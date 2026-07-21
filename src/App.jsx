@@ -140,6 +140,20 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           }
         }
       };
+    for (const G of b.scopes || []) {
+      G.costs || (G.costs = []);
+      for (const ft of G.costs) {
+        if (!ft.stageId && ft.stageName) {
+          const $ = (G.stages || []).find((Q) => Q.name === ft.stageName);
+          $ && (ft.stageId = $.id);
+          delete ft.stageName;
+        }
+        ft.status || (ft.status = ft.paidDate ? "paid" : "pending");
+        ft.paidDate == null && (ft.paidDate = "");
+        ft.pmtId == null && (ft.pmtId = "");
+        ft.description == null && (ft.description = "");
+      }
+    }
     for (const G of b.scopes)
       for (const ft of G.docs || [])
         b.docs.some(($) => $.id === ft.id) ||
@@ -176,8 +190,538 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     return b;
   },
   Ar = (I) => (I || []).map($r),
+  mf = [
+    { v: "materials", l: "Materials" },
+    { v: "labor", l: "Labor" },
+    { v: "misc", l: "Misc" },
+  ],
+  yf = {
+    materials: ["Home Depot", "Contractor Warehouse", "Amazon", "Lowes", "Equipment"],
+    labor: [],
+    misc: ["Landfill", "Permits"],
+  },
+  wf = {
+    materials: [
+      "Attic Ladder",
+      "French Door",
+      "Fence Hardware",
+      "Refund Fence Hardware",
+      "Drywall Screws",
+      "Paint",
+      "Smoke Detector",
+    ],
+    labor: ["Labor", "Progress payment", "Invoice"],
+    misc: ["Food / Water", "Permits"],
+  },
+  Du = (I, b) => {
+    const fe = [...(yf[I] || [])];
+    if (I !== "labor") return fe;
+    const G = (b || "").trim();
+    return G && !fe.includes(G) ? [...fe, G] : fe;
+  },
+  Lu = (I) => {
+    const b = parseFloat(String(I == null ? "" : I).replace(/,/g, ""));
+    return Number.isFinite(b) && b !== 0 ? b : null;
+  },
+  Fu = (I) => Lu(I) != null && Lu(I) < 0,
+  em = (I) => ({
+    paidDate:
+      wu(I.paidDate) ||
+      I.paidDate ||
+      new Date().toISOString().split("T")[0],
+    method: I.method || "",
+    conf: I.conf || "",
+    notes: I.notes || "",
+    syncChoice: I.pmtId ? "sync" : "paid_only",
+  }),
+  Af = (I) => {
+    const b = (I.description || "").trim();
+    return b || (I.vendor || "").trim() || "—";
+  },
+  Ff = (I) => {
+    const b = (I.description || "").trim(),
+      fe = (I.vendor || I.to || "").trim();
+    return b ? (fe ? `${b} — ${fe}` : b) : fe || "Expense";
+  },
+  Nf = (I) => ({
+    id: I.id,
+    date: I.date,
+    vendor: I.vendor || I.to || "",
+    description: I.description || "",
+    cat: I.costCat || "misc",
+    amt: I.amt,
+    notes: I.notes || "",
+    stageId: I.stageId || "",
+    status: I.status || (I.paidDate ? "paid" : I.source === "cost" ? "pending" : "paid"),
+    paidDate: I.paidDate || "",
+    pmtId: I.pmtId || "",
+    scopeId: I.scopeId || "",
+    contractorId: I.contractorId || "",
+    phId: I.phId || "",
+    source: I.source || "",
+  }),
+  Vf = (I, b, fe, G, ft) => {
+    const $ = {
+        materials: "Materials",
+        labor: "Labor",
+        misc: "Misc",
+      },
+      Q = (I || "").trim(),
+      hn = (b || "").trim();
+    return {
+      id: ve(),
+      pid: ft.pid || "p1",
+      date: wu(ft.date) || new Date().toISOString().split("T")[0],
+      amt: Lu(G) ?? 0,
+      to: Q,
+      vendor: Q,
+      description: hn,
+      method: "",
+      cat: $[fe] || "Misc",
+      costCat: fe || "misc",
+      notes: (ft.notes || "").trim(),
+      conf: "",
+      phId: ft.phId || "",
+      scopeId: ft.scopeId || "",
+      stageId: ft.stageId || "",
+      contractorId: ft.contractorId || "",
+      status: "pending",
+      paidDate: "",
+      pmtId: "",
+      source: "cost",
+    };
+  },
+  _c = (I, b) => {
+    const fe = Lu(b.amt),
+      G = {
+        materials: "Materials",
+        labor: "Labor",
+        misc: "Misc",
+      };
+    if (fe == null || !(b.vendor || "").trim() || !(b.description || "").trim())
+      return null;
+    return {
+      ...I,
+      date: wu(b.date) || I.date,
+      amt: fe,
+      to: b.vendor.trim(),
+      vendor: b.vendor.trim(),
+      description: b.description.trim(),
+      costCat: b.cat || I.costCat || "misc",
+      cat: G[b.cat] || I.cat || "Misc",
+      notes: (b.notes || "").trim(),
+      stageId: b.stageId || "",
+      scopeId: b.scopeId || I.scopeId || "",
+    };
+  },
+  _p = (setPays, setContacts, contacts, pays, payId, form, toast) => {
+    const pay = pays.find((p) => p.id === payId);
+    if (!pay) return !1;
+    const updated = _c(pay, form);
+    if (!updated) return !1;
+    if (updated.pmtId && setContacts && updated.amt >= 0) {
+      const con = contacts.find((c) => c.id === updated.contractorId),
+        scope = con == null ? void 0 : (con.scopes || []).find((sc) => sc.id === updated.scopeId),
+        stage = (scope == null ? void 0 : scope.stages || []).find(
+          (st) => st.id === updated.stageId,
+        );
+      setContacts((cons) =>
+        cons.map((c) =>
+          c.id !== updated.contractorId
+            ? c
+            : {
+                ...c,
+                pmts: (c.pmts || []).map((p) =>
+                  p.id === updated.pmtId
+                    ? {
+                        ...p,
+                        amt: updated.amt,
+                        milestone: Ff(updated),
+                        linkedStage:
+                          (stage == null ? void 0 : stage.name) ||
+                          p.linkedStage,
+                      }
+                    : p,
+                ),
+              },
+        ),
+      );
+    }
+    (setPays((ps) => ps.map((p) => (p.id === payId ? updated : p))),
+      toast("Cost updated ✅"));
+    return !0;
+  },
+  If = (I, b) => {
+    const fe = [...(I || [])],
+      G = new Set(fe.map((ft) => ft.id));
+    for (const ft of b || [])
+      for (const $ of ft.scopes || []) {
+        for (const Q of $.costs || []) {
+          if (G.has(Q.id)) continue;
+          fe.push({
+            id: Q.id,
+            pid: $.pid || (ft.pids || [])[0] || "p1",
+            date: Q.date || new Date().toISOString().split("T")[0],
+            amt: Number.isFinite(Number(Q.amt)) ? Number(Q.amt) : 0,
+            to: Q.vendor || "",
+            vendor: Q.vendor || "",
+            description: Q.description || "",
+            costCat: Q.cat || "misc",
+            cat:
+              { materials: "Materials", labor: "Labor", misc: "Misc" }[
+                Q.cat
+              ] || "Misc",
+            notes: Q.notes || "",
+            method: "",
+            conf: "",
+            phId: $.phId || "",
+            scopeId: $.id,
+            stageId: Q.stageId || "",
+            contractorId: ft.id,
+            status: Q.status || (Q.paidDate ? "paid" : "pending"),
+            paidDate: Q.paidDate || "",
+            pmtId: Q.pmtId || "",
+            source: "cost",
+          });
+          G.add(Q.id);
+        }
+        $.costs = [];
+      }
+    return fe;
+  },
+  rm = (
+    setContacts,
+    setPays,
+    contacts,
+    opts,
+    toast,
+  ) => {
+    const {
+        contactId,
+        scopeId,
+        stageId,
+        pid,
+        amt,
+        paidDate,
+        method,
+        conf,
+        notes,
+        milestone,
+        linkedStage,
+        existingPmtId,
+      } = opts,
+      amount = Lu(amt),
+      contact = contacts.find((c) => c.id === contactId),
+      scope = contact == null ? void 0 : (contact.scopes || []).find((s) => s.id === scopeId);
+    if (!contact || !scope || amount == null || amount <= 0) return !1;
+    const pd = wu(paidDate) || new Date().toISOString().split("T")[0],
+      stage =
+        stageId && (scope.stages || []).find((st) => st.id === stageId),
+      stageName =
+        (stage == null ? void 0 : stage.name) ||
+        linkedStage ||
+        "",
+      projectId = pid || scope.pid || (contact.pids || [])[0] || "p1",
+      ms =
+        (milestone || "").trim() ||
+        (stageName
+          ? `${scope.title || scope.desc || "Scope"} → ${stageName}`
+          : scope.title || scope.desc || "");
+    let pmt,
+      updatedContact;
+    if (existingPmtId) {
+      const existing = (contact.pmts || []).find((p) => p.id === existingPmtId);
+      if (!existing) return !1;
+      pmt = {
+        ...existing,
+        amt: amount,
+        status: "paid",
+        paidDate: pd,
+        method: method || "",
+        conf: conf || "",
+        scopeId: scopeId || existing.scopeId,
+        linkedStage: stageName || existing.linkedStage || "",
+        milestone: ms || existing.milestone || "",
+      };
+      updatedContact = {
+        ...contact,
+        pmts: (contact.pmts || []).map((p) =>
+          p.id === existingPmtId ? pmt : p,
+        ),
+      };
+    } else {
+      pmt = {
+        id: ve(),
+        num: (contact.pmts || []).length + 1,
+        amt: amount,
+        due: pd,
+        milestone: ms,
+        linkedStage: stageName,
+        scopeId,
+        status: "paid",
+        paidDate: pd,
+        method: method || "",
+        conf: conf || "",
+        receiptDocId: "",
+      };
+      updatedContact = {
+        ...contact,
+        pmts: [...(contact.pmts || []), pmt],
+      };
+    }
+    (setContacts((cons) =>
+      cons.map((c) => (c.id === contactId ? updatedContact : c)),
+    ),
+      Mu(setPays, updatedContact, pmt, projectId),
+      notes &&
+        setPays((ps) =>
+          ps.map((p) =>
+            p.pmtId === pmt.id && p.contractorId === contactId
+              ? { ...p, notes }
+              : p,
+          ),
+        ),
+      toast(
+        existingPmtId ? "Payment updated ✅" : "Contractor paid ✅",
+      ));
+    return !0;
+  },
+  $f = (setContacts, setPays, contacts, pays, payId, syncHint, co, toast) => {
+    const pay = pays.find((p) => p.id === payId);
+    if (!pay) return;
+    const wasPaid = pay.status === "paid";
+    if (co.status === "pending") {
+      if (pay.pmtId && pay.contractorId && setContacts) {
+        setContacts((cons) =>
+          cons.map((c) =>
+            c.id !== pay.contractorId
+              ? c
+              : {
+                  ...c,
+                  pmts: (c.pmts || []).map((p) =>
+                    p.id === pay.pmtId
+                      ? {
+                          ...p,
+                          status: "pending",
+                          paidDate: "",
+                          method: "",
+                          conf: "",
+                        }
+                      : p,
+                  ),
+                },
+          ),
+        );
+      }
+      (setPays((ps) =>
+        ps.map((p) =>
+          p.id === payId
+            ? {
+                ...p,
+                status: "pending",
+                paidDate: "",
+                method: "",
+                conf: "",
+                notes: (co.notes ?? p.notes) || "",
+              }
+            : p,
+        ),
+      ),
+        toast("Cost marked pending ✅"));
+      return;
+    }
+    const shouldSync =
+        syncHint === "sync" ||
+        (syncHint === "ask" && co.syncChoice === "sync") ||
+        (!!pay.pmtId && co.syncChoice === "sync"),
+      paidDate = wu(co.paidDate) || new Date().toISOString().split("T")[0];
+    let pmtId = pay.pmtId || "";
+    if (shouldSync && pay.contractorId && Lu(pay.amt) != null && pay.amt >= 0) {
+      const contractor = contacts.find((c) => c.id === pay.contractorId);
+      if (contractor) {
+        const scope = (contractor.scopes || []).find(
+            (sc) => sc.id === pay.scopeId,
+          ),
+          stage = (scope == null ? void 0 : scope.stages || []).find(
+            (st) => st.id === pay.stageId,
+          );
+        let pmts = [...(contractor.pmts || [])];
+        pmtId
+          ? (pmts = pmts.map((p) =>
+              p.id === pmtId
+                ? {
+                    ...p,
+                    status: "paid",
+                    paidDate,
+                    method: co.method || "",
+                    conf: co.conf || "",
+                    amt: pay.amt,
+                  }
+                : p,
+            ))
+          : ((pmtId = ve()),
+            pmts.push({
+              id: pmtId,
+              num: pmts.length + 1,
+              amt: pay.amt,
+              due: paidDate,
+              milestone: Ff(pay),
+              linkedStage: (stage == null ? void 0 : stage.name) || "",
+              scopeId: pay.scopeId || "",
+              status: "paid",
+              paidDate,
+              method: co.method || "",
+              conf: co.conf || "",
+              receiptDocId: "",
+            }));
+        setContacts((cons) =>
+          cons.map((c) =>
+            c.id === pay.contractorId ? { ...c, pmts } : c,
+          ),
+        );
+      }
+    }
+    (setPays((ps) =>
+      ps.map((p) =>
+        p.id === payId
+          ? {
+              ...p,
+              status: "paid",
+              paidDate,
+              method: co.method || "",
+              conf: co.conf || "",
+              notes: (co.notes ?? p.notes) || "",
+              pmtId: shouldSync ? pmtId : p.pmtId || "",
+            }
+          : p,
+      ),
+    ),
+      toast(
+        wasPaid
+          ? "Payment updated ✅"
+          : shouldSync
+            ? "Cost paid & synced to Payments ✅"
+            : "Cost marked paid ✅",
+      ));
+  },
+  Cf = [
+    "home depot",
+    "contractor warehouse",
+    "equipment",
+    "amazon",
+    "lowes",
+    "lowe's",
+    "wayfair",
+    "msi",
+    "tilebar",
+    "landfill",
+    "food / water",
+    "permits",
+    "hd",
+  ],
+  Rf = (I) => {
+    const b = (I || "").trim().toLowerCase();
+    return (
+      !!b &&
+      Cf.some((fe) => b === fe || b.includes(fe) || fe.includes(b))
+    );
+  },
+  xf = (I, b, fe, G, ft) => {
+    if (G) return "sync";
+    if (Rf(I) || b === "materials") return "paid_only";
+    if (b === "labor") return "sync";
+    const hn = (I || "").trim().toLowerCase(),
+      de = (ft || "").trim().toLowerCase(),
+      Vt = (fe == null ? void 0 : fe.name) || "",
+      mn = (fe == null ? void 0 : fe.co) || "",
+      Rt = Vt.trim().toLowerCase(),
+      Y = mn.trim().toLowerCase(),
+      O = `${hn} ${de}`.trim();
+    if (!O) return b === "misc" ? "ask" : "paid_only";
+    if (
+      Rt &&
+      (hn === Rt || hn.includes(Rt) || Rt.includes(hn))
+    )
+      return "sync";
+    if (
+      Y.length > 2 &&
+      (hn === Y || hn.includes(Y) || Y.includes(hn))
+    )
+      return "sync";
+    if (/invoice|progress|draw|milestone|install/i.test(O)) return "sync";
+    return "ask";
+  },
+  _f = (I) => {
+    const b = (fe) =>
+        (I || [])
+          .filter((G) => G.cat === fe)
+          .reduce((G, ft) => G + (Number(ft.amt) || 0), 0),
+      fe = b("materials"),
+      G = b("labor"),
+      ft = b("misc");
+    return {
+      materials: Math.round(fe),
+      labor: Math.round(G),
+      misc: Math.round(ft),
+      total: Math.round(fe + G + ft),
+    };
+  },
+  kf = (I, b) => {
+    if (!b) return "—";
+    const fe = (I || []).find((G) => G.id === b);
+    return (fe == null ? void 0 : fe.name) || "—";
+  },
+  Pf = (I, b, fe, G) => {
+    const ft = {},
+      $ = new Set();
+    for (const Q of b || [])
+      for (const hn of Q.scopes || [])
+        hn.phId === fe &&
+          ($.add(hn.id),
+          (ft[hn.id] = {
+            conId: Q.id,
+            conName: Q.name,
+            scopeTitle: hn.title || hn.desc,
+            stages: hn.stages || [],
+          }));
+    return (I || [])
+      .filter(
+        (Q) =>
+          (!G || Q.pid === G) &&
+          (Q.phId === fe || (Q.scopeId && $.has(Q.scopeId))),
+      )
+      .map((Q) => ({
+        ...Nf(Q),
+        conId: Q.contractorId || ft[Q.scopeId]?.conId || "",
+        conName: ft[Q.scopeId]?.conName || "",
+        scopeTitle: ft[Q.scopeId]?.scopeTitle,
+        stages: ft[Q.scopeId]?.stages || [],
+      }))
+      .sort((Q, hn) => (hn.date || "").localeCompare(Q.date || ""));
+  },
+  Bf = (I, b, fe, G) =>
+    (I || [])
+      .filter(
+        ($) =>
+          $.pid === b &&
+          $.scopeId === fe &&
+          (!G || $.stageId === G),
+      )
+      .map(Nf),
+  zf = (I, b) => {
+    const fe = [];
+    for (const G of I || [])
+      for (const ft of G.scopes || [])
+        ft.phId === b &&
+          fe.push({ ...ft, conId: G.id, conName: G.name, contractor: G });
+    return fe;
+  },
   _u = (I, b, fe) => {
-    const G = (I.scopes || []).find(($) => $.id === b.scopeId);
+    const G = (I.scopes || []).find(($) => $.id === b.scopeId),
+      stage =
+        G && b.linkedStage
+          ? (G.stages || []).find((st) => st.name === b.linkedStage)
+          : null;
     return {
       pid: fe || (I.pids || [])[0] || "p1",
       date:
@@ -186,14 +730,23 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         new Date().toISOString().split("T")[0],
       amt: Number(b.amt) || 0,
       to: I.name,
+      vendor: I.name,
+      description:
+        (b.milestone || b.linkedStage || "").trim() ||
+        `Payment #${b.num}`,
       method: b.method || "",
-      cat: I.trade || "Labor",
+      cat: "Labor",
+      costCat: "labor",
       notes: `Payment #${b.num} — ${b.milestone || b.linkedStage || ""}`,
       conf: b.conf || "",
       phId: (G == null ? void 0 : G.phId) || "",
       scopeId: b.scopeId || "",
+      stageId: (stage == null ? void 0 : stage.id) || "",
       pmtId: b.id,
       contractorId: I.id,
+      status: "paid",
+      paidDate: b.paidDate || "",
+      source: "pmt",
     };
   },
   Nu = (I, b) => {
@@ -314,6 +867,33 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       : I === "construction"
         ? "פרויקט קונסטרקשיין ללקוח"
         : "—",
+  Pc = (I, b) => {
+    if (!b) return !1;
+    const fe = (I || []).find((G) => G.id === b);
+    return PfFin(fe);
+  },
+  PfFin = (I) => {
+    const st = I == null ? void 0 : I.status;
+    return st === "finished" || st === "closed";
+  },
+  PfDate = (I) =>
+    (I == null ? void 0 : I.finishedDate) ||
+    (I == null ? void 0 : I.closedDate) ||
+    "",
+  PfDateFmt = (I) => {
+    const b = PfDate(I);
+    if (!b) return "";
+    const fe = b.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!fe) return b;
+    return new Date(+fe[1], +fe[2] - 1, +fe[3]).toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+  },
+  PcMsg =
+    "This project is finished — reopen from the dashboard to edit financial data.",
+  PcStop = (I, b, fe) => (Pc(I, b) ? (fe(`${PcMsg} 🔒`), !0) : !1),
   Wu = (I) =>
     (I || []).map((b) => {
       if (
@@ -978,6 +1558,93 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         ],
       }),
     }),
+  PfDlg = ({ mode: e, onConfirm: t, onCancel: n }) => {
+    const r = e === "finish";
+    return l.jsx("div", {
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 1200,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0,0,0,.4)",
+        backdropFilter: "blur(2px)",
+      },
+      onClick: n,
+      children: l.jsxs("div", {
+        onClick: (i) => i.stopPropagation(),
+        style: {
+          background: u.card,
+          borderRadius: 12,
+          padding: 20,
+          width: "90%",
+          maxWidth: 420,
+          boxShadow: "0 8px 32px rgba(0,0,0,.15)",
+          animation: "si .12s",
+        },
+        children: [
+          l.jsx("div", {
+            style: { fontSize: 16, fontWeight: 700, marginBottom: 12 },
+            children: r ? "Finish Project" : "Reopen Project",
+          }),
+          r
+            ? l.jsxs("div", {
+                style: {
+                  fontSize: 13,
+                  color: u.text2,
+                  lineHeight: 1.55,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  marginBottom: 16,
+                },
+                children: [
+                  l.jsx("p", {
+                    style: { margin: 0 },
+                    children: "The project has been completed.",
+                  }),
+                  l.jsx("p", {
+                    style: { margin: 0, fontWeight: 600, color: u.text },
+                    children: "Nothing will be deleted or modified.",
+                  }),
+                  l.jsx("p", {
+                    style: { margin: 0 },
+                    children:
+                      "The project will become read-only for financial changes (expenses, payments, contracts, change orders, etc.).",
+                  }),
+                  l.jsx("p", {
+                    style: { margin: 0 },
+                    children:
+                      "You can reopen the project at any time if additional work or changes are needed.",
+                  }),
+                ],
+              })
+            : l.jsx("p", {
+                style: {
+                  fontSize: 13,
+                  color: u.text2,
+                  lineHeight: 1.55,
+                  margin: "0 0 16px",
+                },
+                children:
+                  "Financial editing will be enabled again. All existing project data stays exactly as it is — nothing is deleted or modified.",
+              }),
+          l.jsxs("div", {
+            style: { display: "flex", gap: 8, justifyContent: "flex-end" },
+            children: [
+              l.jsx(H, { v: "secondary", onClick: n, children: "Cancel" }),
+              l.jsx(H, {
+                v: r ? "success" : "secondary",
+                onClick: t,
+                children: r ? "Finish Project" : "Reopen Project",
+              }),
+            ],
+          }),
+        ],
+      }),
+    });
+  },
   Ti = () => {
     const [e, t] = T.useState(null),
       n = (i, o) => t({ msg: i, cb: o }),
@@ -1710,9 +2377,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       ],
     });
   },
-  mu = ({ projs: e, phases: t, tasks: n, pays: r, cp: i, setPage: o }) => {
+  mu = ({
+    projs: e,
+    phases: t,
+    tasks: n,
+    pays: r,
+    cp: i,
+    setPage: o,
+    setProjs,
+    showToast,
+  }) => {
     var k, hn;
-    const [Ln, Un] = T.useState(!1);
+    const [Ln, Un] = T.useState(!1),
+      [pfDlg, setPfDlg] = T.useState(null);
     T.useEffect(() => {
       Un(!1);
     }, [i]);
@@ -1780,10 +2457,111 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         l.jsx("div", { onClick: () => o("budget"), style: Vn, children: y });
     return l.jsxs("div", {
       children: [
-        l.jsx("h2", {
-          style: { fontSize: 20, fontWeight: 700, marginBottom: 12 },
-          children: i ? ((k = d[0]) == null ? void 0 : k.name) : se.allProjects,
+        i &&
+          d[0] &&
+          PfFin(d[0]) &&
+          l.jsxs("div", {
+            style: {
+              marginBottom: 16,
+              padding: "20px 22px",
+              background: `linear-gradient(135deg, ${u.green}22 0%, ${u.green}10 100%)`,
+              border: `3px solid ${u.green}`,
+              borderRadius: 14,
+              textAlign: "center",
+              boxShadow: `0 4px 20px ${u.green}28`,
+            },
+            children: [
+              l.jsx("div", {
+                style: {
+                  fontSize: 20,
+                  fontWeight: 900,
+                  color: u.green,
+                  letterSpacing: "0.06em",
+                  lineHeight: 1.3,
+                  marginBottom: PfDate(d[0]) ? 8 : 0,
+                  textTransform: "uppercase",
+                },
+                children: "🎉✅ PROJECT FINISHED",
+              }),
+              PfDate(d[0]) &&
+                l.jsxs("div", {
+                  style: {
+                    fontSize: 15,
+                    fontWeight: 700,
+                    color: u.text,
+                  },
+                  children: ["Finished on: ", PfDateFmt(d[0])],
+                }),
+            ],
+          }),
+        l.jsxs("div", {
+          style: {
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 12,
+          },
+          children: [
+            l.jsxs("div", {
+              children: [
+                l.jsxs("div", {
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                  },
+                  children: [
+                    l.jsx("h2", {
+                      style: { fontSize: 20, fontWeight: 700, margin: 0 },
+                      children: i
+                        ? ((k = d[0]) == null ? void 0 : k.name)
+                        : se.allProjects,
+                    }),
+                  ],
+                }),
+              ],
+            }),
+            i &&
+              d[0] &&
+              l.jsx(H, {
+                v: "secondary",
+                sz: "sm",
+                onClick: () =>
+                  setPfDlg(PfFin(d[0]) ? "reopen" : "finish"),
+                children: PfFin(d[0]) ? "Reopen Project" : "Finish Project",
+              }),
+          ],
         }),
+        pfDlg &&
+          l.jsx(PfDlg, {
+            mode: pfDlg,
+            onCancel: () => setPfDlg(null),
+            onConfirm: () => {
+              const finishing = pfDlg === "finish";
+              setProjs((y) =>
+                y.map((C) =>
+                  C.id === i
+                    ? finishing
+                      ? {
+                          ...C,
+                          status: "finished",
+                          finishedDate: new Date()
+                            .toISOString()
+                            .split("T")[0],
+                        }
+                      : { ...C, status: "active" }
+                    : C,
+                ),
+              );
+              showToast(
+                finishing ? "Project finished ✅" : "Project reopened ✅",
+              );
+              setPfDlg(null);
+            },
+          }),
         l.jsxs("div", {
           style: {
             display: "grid",
@@ -2059,7 +2837,17 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       ],
     });
   },
-  eg = ({ phases: e, setPhases: t, cp: n, contacts: r, setContacts: st, showToast: i }) => {
+  eg = ({
+    phases: e,
+    setPhases: t,
+    cp: n,
+    projs: pj,
+    contacts: r,
+    setContacts: st,
+    showToast: i,
+    pays: Df,
+    setPays: Lf,
+  }) => {
     const [o, s] = T.useState(null),
       [wr, kr] = T.useState(null),
       [ko, To] = T.useState(null),
@@ -2074,6 +2862,50 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       { ask: F, modal: B } = Ti(),
       [V, A] = T.useState(null),
       [ue, P] = T.useState(null),
+      [Mf, Wf] = T.useState(!1),
+      [Uf, Gf] = T.useState(null),
+      [Hf, Jf] = T.useState({
+        date: "",
+        vendor: "",
+        description: "",
+        cat: "materials",
+        amt: "",
+        notes: "",
+        stageId: "",
+        scopeId: "",
+      }),
+      [Kf, Yf] = T.useState(null),
+      [Xf, Qf] = T.useState({
+        paidDate: "",
+        method: "",
+        conf: "",
+        notes: "",
+        syncChoice: "paid_only",
+      }),
+      [sf, uf] = T.useState(null),
+      [ef, tf] = T.useState({
+        date: "",
+        vendor: "",
+        description: "",
+        cat: "materials",
+        amt: "",
+        notes: "",
+        stageId: "",
+        scopeId: "",
+      }),
+      [Im, Rm] = T.useState(!1),
+      [Om, jm] = T.useState(null),
+      [Jp, Kp] = T.useState({
+        scopeId: "",
+        stageId: "",
+        existingPmtId: "",
+        amt: "",
+        paidDate: "",
+        method: "",
+        conf: "",
+        notes: "",
+        milestone: "",
+      }),
       z = [
         { v: "EA", l: "יחידה" },
         { v: "SF", l: "רגל רבוע" },
@@ -2307,6 +3139,174 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ),
         );
       },
+      Zf = (v) => {
+        if (PcStop(pj, n, i)) return;
+        const g = zf(r, v);
+        if (!g.length)
+          return alert(
+            "No contractor scope linked to this phase yet. Add a Scope of Work on the contractor and link it to this phase.",
+          );
+        (Gf(v),
+          Jf({
+            date: new Date().toISOString().split("T")[0],
+            vendor: "",
+            description: "",
+            cat: "materials",
+            amt: "",
+            notes: "",
+            stageId: "",
+            scopeId: g.length === 1 ? g[0].id : "",
+          }),
+          Wf(!0));
+      },
+      hd = (v) => {
+        if (PcStop(pj, n, i)) return;
+        const g = zf(r, v);
+        if (!g.length)
+          return alert(
+            "No contractor scope linked to this phase yet. Add a Scope of Work on the contractor and link it to this phase.",
+          );
+        (jm(v),
+          Kp({
+            scopeId: g.length === 1 ? g[0].id : "",
+            stageId: "",
+            existingPmtId: "",
+            amt: "",
+            paidDate: new Date().toISOString().split("T")[0],
+            method: "",
+            conf: "",
+            notes: "",
+            milestone: "",
+          }),
+          Rm(!0));
+      },
+      pd = () => {
+        if (PcStop(pj, n, i)) return;
+        if (!Om) return;
+        const v = zf(r, Om),
+          g = v.find((I) => I.id === Jp.scopeId);
+        if (!g) return alert("Please select a contractor scope.");
+        rm(
+          st,
+          Lf,
+          r,
+          {
+            contactId: g.conId,
+            scopeId: Jp.scopeId,
+            stageId: Jp.stageId,
+            pid: n,
+            amt: Jp.amt,
+            paidDate: Jp.paidDate,
+            method: Jp.method,
+            conf: Jp.conf,
+            notes: Jp.notes,
+            milestone: Jp.milestone,
+            linkedStage: kf(g.stages, Jp.stageId),
+            existingPmtId: Jp.existingPmtId,
+          },
+          i,
+        )
+          ? (Rm(!1), jm(null))
+          : alert("Please enter a valid payment amount.");
+      },
+      ed = () => {
+        if (PcStop(pj, n, i)) return;
+        if (!Uf) return;
+        const v = zf(r, Uf),
+          g = v.find((I) => I.id === Hf.scopeId);
+        if (!g) return alert("Please select a contractor scope.");
+        const I = Lu(Hf.amt);
+        if (!Hf.vendor.trim() || !Hf.description.trim() || I == null)
+          return alert(
+            "Please enter a vendor, description, and non-zero amount (use negative for refunds).",
+          );
+        const b = Vf(
+          Hf.vendor,
+          Hf.description,
+          Hf.cat,
+          I,
+          {
+            pid: n,
+            phId: g.phId || "",
+            scopeId: g.id,
+            stageId: Hf.stageId || "",
+            contractorId: g.conId,
+            date: Hf.date,
+            notes: Hf.notes,
+          },
+        );
+        (Lf((fe) => [...fe, b]),
+          Wf(!1),
+          Gf(null),
+          i("Cost added ✅"));
+      },
+      td = (v) => {
+        if (PcStop(pj, n, i)) return;
+        const pay = Df.find((I) => I.id === v.id) || v,
+          g = r.find((I) => I.id === v.conId);
+        (Qf(em(pay)),
+          Yf({
+            conId: v.conId,
+            scopeId: v.scopeId,
+            costId: v.id,
+            syncHint: Fu(pay.amt)
+              ? "paid_only"
+              : xf(
+                  pay.vendor,
+                  pay.costCat || pay.cat,
+                  g,
+                  pay.pmtId,
+                  pay.description,
+                ),
+          }));
+      },
+      nd = (v) => {
+        if (PcStop(pj, n, i)) return;
+        Kf &&
+          ($f(
+            st,
+            Lf,
+            r,
+            Df,
+            Kf.costId,
+            Kf.syncHint,
+            { ...Xf, status: v || "paid" },
+            i,
+          ),
+          Yf(null));
+      },
+      rd = (v, g, I) => {
+        if (PcStop(pj, n, i)) return;
+        F("Delete this cost?", () => {
+          (Lf((b) => b.filter((fe) => fe.id !== I)),
+            i("Cost deleted ✅"));
+        });
+      },
+      ld = (v) => {
+        if (PcStop(pj, n, i)) return;
+        const g = Df.find((I) => I.id === v.id) || v,
+          I = Nf(g);
+        (tf({
+          date: g.date || "",
+          vendor: I.vendor,
+          description: I.description,
+          cat: I.cat,
+          amt: String(g.amt ?? ""),
+          notes: I.notes || "",
+          stageId: I.stageId || "",
+          scopeId: g.scopeId || v.scopeId || "",
+        }),
+          uf(v.id));
+      },
+      cd = () => {
+        if (PcStop(pj, n, i)) return;
+        if (!sf) return;
+        _p(Lf, st, r, Df, sf, ef, i)
+          ? uf(null)
+          : alert(
+              "Please enter a vendor, description, and non-zero amount (use negative for refunds).",
+            );
+      },
       Pr = (v) => {
         const g = r.find((I) => I.id === v.conId),
           I = g == null ? void 0 : g.scopes.find((b) => b.id === v.id);
@@ -2353,7 +3353,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         "#7c3aed",
         "#0891b2",
         "#ec4899",
-      ];
+      ],
+      PcLk = Pc(pj, n);
     return l.jsxs("div", {
       children: [
         l.jsxs("div", {
@@ -2388,6 +3389,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             }),
           ],
         }),
+        PcLk &&
+          l.jsxs("div", {
+            style: {
+              marginBottom: 12,
+              padding: "10px 14px",
+              background: u.yellow + "15",
+              border: `1px solid ${u.yellow}40`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: u.text2,
+            },
+            children: ["🔒 ", PcMsg],
+          }),
         pt.map((v, g) => {
           const I = M[v.name],
             b = $n[g % $n.length],
@@ -2686,6 +3700,55 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                       " פריטים)",
                                     ],
                                   }),
+                                (() => {
+                                  const En = Pf(Df, r, G.id, n),
+                                    An = _f(En),
+                                    kn = En.filter(
+                                      (lt) => lt.status !== "paid",
+                                    ).length;
+                                  return l.jsxs("div", {
+                                    onClick: (lt) => lt.stopPropagation(),
+                                    style: {
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      marginTop: 4,
+                                      flexWrap: "wrap",
+                                    },
+                                    children: [
+                                      En.length > 0 &&
+                                        l.jsxs("span", {
+                                          style: {
+                                            fontSize: 9,
+                                            color: u.text2,
+                                          },
+                                          children: [
+                                            "🧾 $",
+                                            An.total.toLocaleString(),
+                                            " costs",
+                                            kn > 0 ? ` · ${kn} pending` : "",
+                                          ],
+                                        }),
+                                      !PcLk &&
+                                        l.jsx(H, {
+                                          sz: "sm",
+                                          onClick: () => Zf(G.id),
+                                          children: "+ Cost",
+                                        }),
+                                      !PcLk &&
+                                        zf(r, G.id).length > 0 &&
+                                        l.jsx(H, {
+                                          sz: "sm",
+                                          v: "success",
+                                          icon: di,
+                                          onClick: (lt) => {
+                                            (lt.stopPropagation(), hd(G.id));
+                                          },
+                                          children: "+ Pay",
+                                        }),
+                                    ],
+                                  });
+                                })(),
                                 Qe.length > 0 &&
                                   l.jsx("div", {
                                     style: {
@@ -3626,6 +4689,376 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       }),
                   ],
                 }),
+                (() => {
+                  const v = Pf(Df, r, o.id, n),
+                    g = _f(v),
+                    I = v.filter((b) => b.status !== "paid").length;
+                  return l.jsxs("div", {
+                    style: {
+                      borderTop: `1px solid ${u.border}`,
+                      paddingTop: 8,
+                    },
+                    children: [
+                      l.jsxs("div", {
+                        style: {
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          marginBottom: 6,
+                        },
+                        children: [
+                          l.jsxs("h4", {
+                            style: { fontSize: 13, fontWeight: 600 },
+                            children: ["🧾 Costs (", v.length, ")"],
+                          }),
+                          l.jsxs("div", {
+                            style: { display: "flex", gap: 6 },
+                            children: [
+                              !PcLk &&
+                                zf(r, o.id).length > 0 &&
+                                l.jsx(H, {
+                                  sz: "sm",
+                                  v: "success",
+                                  icon: di,
+                                  onClick: () => hd(o.id),
+                                  children: "+ Pay",
+                                }),
+                              !PcLk &&
+                                l.jsx(H, {
+                                  sz: "sm",
+                                  icon: Ce,
+                                  onClick: () => Zf(o.id),
+                                  children: "+ Cost",
+                                }),
+                            ],
+                          }),
+                        ],
+                      }),
+                      l.jsx("p", {
+                        style: {
+                          fontSize: 10,
+                          color: u.text3,
+                          margin: "0 0 8px",
+                        },
+                        children:
+                          "Stage expenses from the job site. Linked to contractor scopes for this phase.",
+                      }),
+                      v.length > 0
+                        ? l.jsxs(l.Fragment, {
+                            children: [
+                              l.jsxs("div", {
+                                style: {
+                                  display: "grid",
+                                  gridTemplateColumns: "repeat(4, 1fr)",
+                                  gap: 6,
+                                  marginBottom: 8,
+                                  fontSize: 10,
+                                },
+                                children: [
+                                  ["Materials", g.materials, u.accent],
+                                  ["Labor", g.labor, u.green],
+                                  ["Misc", g.misc, u.yellow],
+                                  ["Total", g.total, u.text],
+                                ].map(([b, fe, $e]) =>
+                                  l.jsxs(
+                                    "div",
+                                    {
+                                      style: {
+                                        padding: 6,
+                                        background: u.card2,
+                                        borderRadius: 6,
+                                        textAlign: "center",
+                                      },
+                                      children: [
+                                        l.jsx("div", {
+                                          style: { color: u.text3 },
+                                          children: b,
+                                        }),
+                                        l.jsxs("div", {
+                                          style: {
+                                            fontWeight: 700,
+                                            fontFamily: "'JetBrains Mono'",
+                                            color: $e,
+                                          },
+                                          children: [
+                                            "$",
+                                            fe.toLocaleString(),
+                                          ],
+                                        }),
+                                      ],
+                                    },
+                                    b,
+                                  ),
+                                ),
+                              }),
+                              I > 0 &&
+                                l.jsxs("div", {
+                                  style: {
+                                    fontSize: 10,
+                                    color: u.yellow,
+                                    marginBottom: 6,
+                                  },
+                                  children: [I, " pending"],
+                                }),
+                              l.jsxs("table", {
+                                style: {
+                                  width: "100%",
+                                  borderCollapse: "collapse",
+                                  fontSize: 10,
+                                },
+                                children: [
+                                  l.jsx("thead", {
+                                    children: l.jsx("tr", {
+                                      style: { color: u.text3 },
+                                      children: [
+                                        "Date",
+                                        "Vendor",
+                                        "Description",
+                                        "Contractor",
+                                        "Status",
+                                        "Amount",
+                                        "",
+                                      ].map((b) =>
+                                        l.jsx(
+                                          "th",
+                                          {
+                                            style: {
+                                              padding: "4px 6px",
+                                              textAlign:
+                                                b === "Amount" ? "right" : "left",
+                                              fontWeight: 600,
+                                            },
+                                            children: b,
+                                          },
+                                          b,
+                                        ),
+                                      ),
+                                    }),
+                                  }),
+                                  l.jsx("tbody", {
+                                    children: v.map((b) =>
+                                      l.jsxs(
+                                        "tr",
+                                        {
+                                          style: {
+                                            borderTop: `1px solid ${u.border}`,
+                                          },
+                                          children: [
+                                            l.jsx("td", {
+                                              style: { padding: "4px 6px" },
+                                              children: b.date || "—",
+                                            }),
+                                            l.jsx("td", {
+                                              style: {
+                                                padding: "4px 6px",
+                                                color: u.text3,
+                                                fontSize: 10,
+                                              },
+                                              children: b.vendor || "—",
+                                            }),
+                                            l.jsx("td", {
+                                              style: {
+                                                padding: "4px 6px",
+                                                fontWeight: 600,
+                                              },
+                                              children: l.jsxs("div", {
+                                                style: {
+                                                  display: "flex",
+                                                  alignItems: "center",
+                                                  gap: 4,
+                                                  flexWrap: "wrap",
+                                                },
+                                                children: [
+                                                  Fu(b.amt) &&
+                                                    l.jsx("span", {
+                                                      style: {
+                                                        fontSize: 9,
+                                                        fontWeight: 600,
+                                                        padding: "2px 6px",
+                                                        borderRadius: 4,
+                                                        background:
+                                                          u.green + "18",
+                                                        color: u.green,
+                                                      },
+                                                      children: "Refund",
+                                                    }),
+                                                  l.jsx("span", {
+                                                    style: {
+                                                      color: Fu(b.amt)
+                                                        ? u.green
+                                                        : u.text,
+                                                    },
+                                                    children: Af(b),
+                                                  }),
+                                                ],
+                                              }),
+                                            }),
+                                            l.jsx("td", {
+                                              style: {
+                                                padding: "4px 6px",
+                                                color: u.text3,
+                                              },
+                                              children: b.conName,
+                                            }),
+                                            l.jsx("td", {
+                                              onClick:
+                                                !PcLk && b.status === "paid"
+                                                  ? () => td(b)
+                                                  : void 0,
+                                              title:
+                                                !PcLk && b.status === "paid"
+                                                  ? "Edit payment details"
+                                                  : void 0,
+                                              style: {
+                                                padding: "4px 6px",
+                                                cursor:
+                                                  !PcLk && b.status === "paid"
+                                                    ? "pointer"
+                                                    : "default",
+                                              },
+                                              children: l.jsxs("div", {
+                                                style: {
+                                                  display: "flex",
+                                                  flexDirection: "column",
+                                                  gap: 1,
+                                                },
+                                                children: [
+                                                  l.jsx("span", {
+                                                    style: {
+                                                      fontSize: 9,
+                                                      fontWeight: 600,
+                                                      color:
+                                                        b.status === "paid"
+                                                          ? u.green
+                                                          : u.yellow,
+                                                      textDecoration:
+                                                        b.status === "paid"
+                                                          ? "underline"
+                                                          : "none",
+                                                    },
+                                                    children:
+                                                      b.status === "paid"
+                                                        ? "Paid"
+                                                        : "Pending",
+                                                  }),
+                                                  b.status === "paid" &&
+                                                    b.paidDate &&
+                                                    l.jsx("span", {
+                                                      style: {
+                                                        fontSize: 8,
+                                                        color: u.text3,
+                                                        textDecoration:
+                                                          "underline",
+                                                      },
+                                                      children: b.paidDate,
+                                                    }),
+                                                ],
+                                              }),
+                                            }),
+                                            l.jsxs("td", {
+                                              style: {
+                                                padding: "4px 6px",
+                                                textAlign: "right",
+                                                fontFamily: "'JetBrains Mono'",
+                                                fontWeight: 600,
+                                                color: Fu(b.amt)
+                                                  ? u.green
+                                                  : u.text,
+                                              },
+                                              children: [
+                                                Fu(b.amt) ? "-" : "",
+                                                "$",
+                                                Math.abs(
+                                                  Number(b.amt) || 0,
+                                                ).toLocaleString(),
+                                              ],
+                                            }),
+                                            l.jsx("td", {
+                                              style: {
+                                                padding: "2px 4px",
+                                                textAlign: "right",
+                                              },
+                                              children: l.jsxs("div", {
+                                                style: {
+                                                  display: "flex",
+                                                  gap: 4,
+                                                  justifyContent: "flex-end",
+                                                },
+                                                children: [
+                                                  !PcLk &&
+                                                    b.status !== "paid" &&
+                                                    l.jsx(H, {
+                                                      sz: "sm",
+                                                      v: "success",
+                                                      onClick: () => td(b),
+                                                      children: "Mark Paid",
+                                                    }),
+                                                  !PcLk &&
+                                                    l.jsx("button", {
+                                                      onClick: () => ld(b),
+                                                      title: "Edit",
+                                                      style: {
+                                                        background: u.card2,
+                                                        border: `1px solid ${u.border}`,
+                                                        borderRadius: 4,
+                                                        padding: 3,
+                                                        cursor: "pointer",
+                                                        color: u.text2,
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                      },
+                                                      children: l.jsx(pi, {
+                                                        size: 11,
+                                                      }),
+                                                    }),
+                                                  !PcLk &&
+                                                    l.jsx("button", {
+                                                      onClick: () =>
+                                                        rd(
+                                                          b.conId,
+                                                          b.scopeId,
+                                                          b.id,
+                                                        ),
+                                                      style: {
+                                                        background: u.red + "10",
+                                                        border: "none",
+                                                        borderRadius: 4,
+                                                        padding: 3,
+                                                        cursor: "pointer",
+                                                        color: u.red,
+                                                      },
+                                                      children: l.jsx(Pe, {
+                                                        size: 11,
+                                                      }),
+                                                    }),
+                                                ],
+                                              }),
+                                            }),
+                                          ],
+                                        },
+                                        b.id,
+                                      ),
+                                    ),
+                                  }),
+                                ],
+                              }),
+                            ],
+                          })
+                        : l.jsx("div", {
+                            style: {
+                              fontSize: 11,
+                              color: u.text3,
+                              textAlign: "center",
+                              padding: 12,
+                              background: u.card2,
+                              borderRadius: 8,
+                            },
+                            children:
+                              "No costs yet. Tap + Cost to log a purchase from the job site.",
+                          }),
+                    ],
+                  });
+                })(),
                 l.jsx("div", {
                   style: {
                     borderTop: `1px solid ${u.border}`,
@@ -4316,6 +5749,682 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               ],
             }),
           }),
+        Mf &&
+          Uf &&
+          l.jsx(Fe, {
+            title: "Add Cost",
+            onClose: () => {
+              (Wf(!1), Gf(null));
+            },
+            w: 420,
+            children: l.jsxs("div", {
+              style: { display: "flex", flexDirection: "column", gap: 10 },
+              children: [
+                l.jsxs("div", {
+                  style: {
+                    padding: 8,
+                    background: u.card2,
+                    borderRadius: 6,
+                    fontSize: 11,
+                    color: u.text2,
+                  },
+                  children: [
+                    "Phase: ",
+                    (e.find((v) => v.id === Uf) || {}).he ||
+                      (e.find((v) => v.id === Uf) || {}).name ||
+                      "—",
+                  ],
+                }),
+                (() => {
+                  const v = zf(r, Uf);
+                  return v.length > 1
+                    ? l.jsx(D, {
+                        label: "Contractor / Scope",
+                        value: Hf.scopeId,
+                        onChange: (g) =>
+                          Jf((I) => ({
+                            ...I,
+                            scopeId: g,
+                            stageId: "",
+                          })),
+                        opts: [
+                          { v: "", l: "— Select scope —" },
+                          ...v.map((g) => ({
+                            v: g.id,
+                            l: `${g.conName} — ${g.title || g.desc}`,
+                          })),
+                        ],
+                      })
+                    : v.length === 1
+                      ? l.jsx("div", {
+                          style: {
+                            padding: 8,
+                            background: u.card2,
+                            borderRadius: 6,
+                            fontSize: 11,
+                            color: u.text3,
+                          },
+                          children: `Contractor: ${v[0].conName} — ${v[0].title || v[0].desc}`,
+                        })
+                      : null;
+                })(),
+                (() => {
+                  const v = zf(r, Uf).find((g) => g.id === Hf.scopeId);
+                  return l.jsx(D, {
+                    label: "Milestone (optional)",
+                    value: Hf.stageId,
+                    onChange: (g) => Jf((I) => ({ ...I, stageId: g })),
+                    opts: [
+                      { v: "", l: "— Not milestone-specific —" },
+                      ...((v == null ? void 0 : v.stages) || []).map((g) => ({
+                        v: g.id,
+                        l: g.name,
+                      })),
+                    ],
+                  });
+                })(),
+                l.jsx(D, {
+                  label: "Category",
+                  value: Hf.cat,
+                  onChange: (v) =>
+                    Jf((g) => ({ ...g, cat: v, vendor: "" })),
+                  opts: mf,
+                }),
+                l.jsx(D, {
+                  label: "Vendor",
+                  value: Hf.vendor,
+                  onChange: (v) => Jf((g) => ({ ...g, vendor: v })),
+                  ph: Du(
+                    Hf.cat,
+                    (zf(r, Uf).find((v) => v.id === Hf.scopeId) || {}).conName,
+                  ).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: Du(
+                    Hf.cat,
+                    (zf(r, Uf).find((v) => v.id === Hf.scopeId) || {}).conName,
+                  ).map((v) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => Jf((g) => ({ ...g, vendor: v })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: v,
+                      },
+                      v,
+                    ),
+                  ),
+                }),
+                l.jsx(D, {
+                  label: "Cost Description",
+                  value: Hf.description,
+                  onChange: (v) => Jf((g) => ({ ...g, description: v })),
+                  ph: (wf[Hf.cat] || []).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: (wf[Hf.cat] || []).map((v) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => Jf((g) => ({ ...g, description: v })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: v,
+                      },
+                      v,
+                    ),
+                  ),
+                }),
+                l.jsxs("div", {
+                  style: {
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 8,
+                  },
+                  children: [
+                    l.jsx(D, {
+                      label: "Amount ($)",
+                      type: "number",
+                      value: Hf.amt,
+                      onChange: (v) => Jf((g) => ({ ...g, amt: v })),
+                      ph: "Negative for refunds (e.g. -181)",
+                    }),
+                    l.jsx(D, {
+                      label: "Date",
+                      type: "date",
+                      value: wu(Hf.date) || Hf.date,
+                      onChange: (v) => Jf((g) => ({ ...g, date: v })),
+                    }),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Notes",
+                  value: Hf.notes,
+                  onChange: (v) => Jf((g) => ({ ...g, notes: v })),
+                  ph: "Optional",
+                }),
+                l.jsx(H, {
+                  onClick: ed,
+                  v: "success",
+                  icon: Ce,
+                  children: "Add Cost",
+                }),
+              ],
+            }),
+          }),
+        Im &&
+          Om &&
+          l.jsx(Fe, {
+            title: "Pay Contractor",
+            onClose: () => {
+              (Rm(!1), jm(null));
+            },
+            w: 420,
+            children: l.jsxs("div", {
+              style: { display: "flex", flexDirection: "column", gap: 10 },
+              children: [
+                l.jsxs("div", {
+                  style: {
+                    padding: 8,
+                    background: u.green + "12",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    color: u.text2,
+                  },
+                  children: [
+                    "Phase: ",
+                    (e.find((v) => v.id === Om) || {}).he ||
+                      (e.find((v) => v.id === Om) || {}).name ||
+                      "—",
+                    l.jsx("div", {
+                      style: {
+                        fontSize: 10,
+                        color: u.text3,
+                        marginTop: 4,
+                      },
+                      children:
+                        "Records on Contractor Payments and syncs to project expenses automatically.",
+                    }),
+                  ],
+                }),
+                (() => {
+                  const v = zf(r, Om);
+                  return v.length > 1
+                    ? l.jsx(D, {
+                        label: "Contractor / Scope",
+                        value: Jp.scopeId,
+                        onChange: (g) =>
+                          Kp((I) => ({
+                            ...I,
+                            scopeId: g,
+                            stageId: "",
+                            existingPmtId: "",
+                            amt: "",
+                            milestone: "",
+                          })),
+                        opts: [
+                          { v: "", l: "— Select scope —" },
+                          ...v.map((g) => ({
+                            v: g.id,
+                            l: `${g.conName} — ${g.title || g.desc}`,
+                          })),
+                        ],
+                      })
+                    : null;
+                })(),
+                (() => {
+                  const v = zf(r, Om).find((g) => g.id === Jp.scopeId),
+                    g =
+                      v &&
+                      r
+                        .find((I) => I.id === v.conId)
+                        ?.pmts?.filter(
+                          (I) =>
+                            I.status !== "paid" &&
+                            (!I.scopeId || I.scopeId === Jp.scopeId),
+                        );
+                  return (
+                    g &&
+                    g.length > 0 &&
+                    l.jsx(D, {
+                      label: "Apply to scheduled payment (optional)",
+                      value: Jp.existingPmtId,
+                      onChange: (I) => {
+                        const b = g.find((fe) => fe.id === I),
+                          $e =
+                            b &&
+                            v &&
+                            (v.stages || []).find(
+                              (G) => G.name === b.linkedStage,
+                            );
+                        Kp((G) => ({
+                          ...G,
+                          existingPmtId: I,
+                          amt: b ? String(b.amt) : G.amt,
+                          stageId: $e ? $e.id : G.stageId,
+                          milestone: (b == null ? void 0 : b.milestone) || G.milestone,
+                        }));
+                      },
+                      opts: [
+                        { v: "", l: "— New payment —" },
+                        ...g.map((I) => ({
+                          v: I.id,
+                          l: `#${I.num} · $${Number(I.amt || 0).toLocaleString()} · ${I.milestone || I.linkedStage || "Payment"}`,
+                        })),
+                      ],
+                    })
+                  );
+                })(),
+                (() => {
+                  const v = zf(r, Om).find((g) => g.id === Jp.scopeId);
+                  return l.jsx(D, {
+                    label: "Milestone (optional)",
+                    value: Jp.stageId,
+                    onChange: (g) => {
+                      const I = (v == null ? void 0 : v.stages || []).find(
+                          (b) => b.id === g,
+                        ),
+                        b =
+                          I && v
+                            ? `${v.title || v.desc || "Scope"} → ${I.name}`
+                            : "";
+                      Kp((fe) => ({
+                        ...fe,
+                        stageId: g,
+                        milestone: b || fe.milestone,
+                      }));
+                    },
+                    opts: [
+                      { v: "", l: "— Not milestone-specific —" },
+                      ...((v == null ? void 0 : v.stages) || []).map((g) => ({
+                        v: g.id,
+                        l: g.name,
+                      })),
+                    ],
+                  });
+                })(),
+                l.jsxs("div", {
+                  style: {
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 8,
+                  },
+                  children: [
+                    l.jsx(D, {
+                      label: "Amount ($)",
+                      type: "number",
+                      value: Jp.amt,
+                      onChange: (v) => Kp((g) => ({ ...g, amt: v })),
+                      ph: "Payment amount",
+                    }),
+                    l.jsx(D, {
+                      label: "Payment Date",
+                      type: "date",
+                      value: wu(Jp.paidDate) || Jp.paidDate,
+                      onChange: (v) => Kp((g) => ({ ...g, paidDate: v })),
+                    }),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Method",
+                  value: Jp.method,
+                  onChange: (v) => Kp((g) => ({ ...g, method: v })),
+                  opts: [
+                    { v: "", l: "—" },
+                    { v: "Check", l: "Check" },
+                    { v: "Wire", l: "Wire" },
+                    { v: "Zelle", l: "Zelle" },
+                    { v: "Cash", l: "Cash" },
+                    { v: "CC", l: "Credit Card" },
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Confirmation #",
+                  value: Jp.conf,
+                  onChange: (v) => Kp((g) => ({ ...g, conf: v })),
+                  ph: "Check #, wire ref, etc.",
+                }),
+                l.jsx(D, {
+                  label: "Notes",
+                  value: Jp.notes,
+                  onChange: (v) => Kp((g) => ({ ...g, notes: v })),
+                  ph: "Optional",
+                }),
+                l.jsx(H, {
+                  onClick: pd,
+                  v: "success",
+                  icon: di,
+                  children: "Record Payment",
+                }),
+              ],
+            }),
+          }),
+        sf &&
+          (() => {
+            const v = Df.find((I) => I.id === sf),
+              g = (v == null ? void 0 : v.phId) || "";
+            return l.jsx(Fe, {
+              title: "Edit Cost",
+              onClose: () => uf(null),
+              w: 420,
+              children: l.jsxs("div", {
+                style: { display: "flex", flexDirection: "column", gap: 10 },
+                children: [
+                  (() => {
+                    const I = zf(r, g);
+                    return I.length > 1
+                      ? l.jsx(D, {
+                          label: "Contractor / Scope",
+                          value: ef.scopeId,
+                          onChange: (b) =>
+                            tf((fe) => ({
+                              ...fe,
+                              scopeId: b,
+                              stageId: "",
+                            })),
+                          opts: [
+                            { v: "", l: "— Select scope —" },
+                            ...I.map((b) => ({
+                              v: b.id,
+                              l: `${b.conName} — ${b.title || b.desc}`,
+                            })),
+                          ],
+                        })
+                      : null;
+                  })(),
+                  (() => {
+                    const I = zf(r, g).find((b) => b.id === ef.scopeId);
+                    return l.jsx(D, {
+                      label: "Milestone (optional)",
+                      value: ef.stageId,
+                      onChange: (b) => tf((fe) => ({ ...fe, stageId: b })),
+                      opts: [
+                        { v: "", l: "— Not milestone-specific —" },
+                        ...((I == null ? void 0 : I.stages) || []).map((b) => ({
+                          v: b.id,
+                          l: b.name,
+                        })),
+                      ],
+                    });
+                  })(),
+                  l.jsx(D, {
+                    label: "Category",
+                    value: ef.cat,
+                    onChange: (I) => tf((b) => ({ ...b, cat: I })),
+                    opts: mf,
+                  }),
+                  l.jsx(D, {
+                    label: "Vendor",
+                    value: ef.vendor,
+                    onChange: (I) => tf((b) => ({ ...b, vendor: I })),
+                    ph: Du(
+                      ef.cat,
+                      (zf(r, g).find((b) => b.id === ef.scopeId) || {}).conName,
+                    ).join(", "),
+                  }),
+                  l.jsx("div", {
+                    style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                    children: Du(
+                      ef.cat,
+                      (zf(r, g).find((b) => b.id === ef.scopeId) || {}).conName,
+                    ).map((I) =>
+                      l.jsx(
+                        "button",
+                        {
+                          type: "button",
+                          onClick: () => tf((b) => ({ ...b, vendor: I })),
+                          style: {
+                            padding: "3px 8px",
+                            fontSize: 10,
+                            borderRadius: 12,
+                            border: `1px solid ${u.border}`,
+                            background: u.card2,
+                            cursor: "pointer",
+                            color: u.text2,
+                          },
+                          children: I,
+                        },
+                        I,
+                      ),
+                    ),
+                  }),
+                  l.jsx(D, {
+                    label: "Cost Description",
+                    value: ef.description,
+                    onChange: (I) => tf((b) => ({ ...b, description: I })),
+                    ph: (wf[ef.cat] || []).join(", "),
+                  }),
+                  l.jsx("div", {
+                    style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                    children: (wf[ef.cat] || []).map((I) =>
+                      l.jsx(
+                        "button",
+                        {
+                          type: "button",
+                          onClick: () =>
+                            tf((b) => ({ ...b, description: I })),
+                          style: {
+                            padding: "3px 8px",
+                            fontSize: 10,
+                            borderRadius: 12,
+                            border: `1px solid ${u.border}`,
+                            background: u.card2,
+                            cursor: "pointer",
+                            color: u.text2,
+                          },
+                          children: I,
+                        },
+                        I,
+                      ),
+                    ),
+                  }),
+                  l.jsxs("div", {
+                    style: {
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 8,
+                    },
+                    children: [
+                      l.jsx(D, {
+                        label: "Amount ($)",
+                        type: "number",
+                        value: ef.amt,
+                        onChange: (I) => tf((b) => ({ ...b, amt: I })),
+                        ph: "Negative for refunds (e.g. -181)",
+                      }),
+                      l.jsx(D, {
+                        label: "Date",
+                        type: "date",
+                        value: wu(ef.date) || ef.date,
+                        onChange: (I) => tf((b) => ({ ...b, date: I })),
+                      }),
+                    ],
+                  }),
+                  l.jsx(D, {
+                    label: "Notes",
+                    value: ef.notes,
+                    onChange: (I) => tf((b) => ({ ...b, notes: I })),
+                    ph: "Optional",
+                  }),
+                  l.jsx(H, {
+                    onClick: cd,
+                    v: "success",
+                    icon: Nt,
+                    children: "Save Changes",
+                  }),
+                ],
+              }),
+            });
+          })(),
+        Kf &&
+          (() => {
+            const v = r.find((I) => I.id === Kf.conId),
+              g = Df.find((I) => I.id === Kf.costId);
+            if (!g) return null;
+            const I = Kf.syncHint || "paid_only";
+            return l.jsx(Fe, {
+              title:
+                g.status === "paid"
+                  ? "Payment Details"
+                  : "Mark Cost Paid",
+              onClose: () => Yf(null),
+              w: 420,
+              children: l.jsxs("div", {
+                style: { display: "flex", flexDirection: "column", gap: 10 },
+                children: [
+                  l.jsxs("div", {
+                    style: {
+                      padding: 8,
+                      background: u.card2,
+                      borderRadius: 6,
+                    },
+                    children: [
+                      l.jsx("div", {
+                        style: { fontSize: 12, fontWeight: 600 },
+                        children: Af(g),
+                      }),
+                      l.jsxs("div", {
+                        style: { fontSize: 11, color: u.text2 },
+                        children: [
+                          g.vendor,
+                          " · ",
+                          (mf.find((b) => b.v === (g.costCat || g.cat)) || {})
+                            .l || g.cat,
+                          " — $",
+                          Math.abs(Number(g.amt) || 0).toLocaleString(),
+                        ],
+                      }),
+                    ],
+                  }),
+                  I === "sync" &&
+                    l.jsx("div", {
+                      style: {
+                        padding: 8,
+                        background: u.green + "12",
+                        borderRadius: 6,
+                        fontSize: 11,
+                        color: u.text2,
+                      },
+                      children: `Will also record a payment on the Payments tab for ${(v == null ? void 0 : v.name) || "this contractor"}.`,
+                    }),
+                  I === "paid_only" &&
+                    l.jsx("div", {
+                      style: {
+                        padding: 8,
+                        background: u.card2,
+                        borderRadius: 6,
+                        fontSize: 11,
+                        color: u.text3,
+                      },
+                      children:
+                        "Supplier / direct expense — payment schedule unchanged.",
+                    }),
+                  I === "ask" &&
+                    l.jsxs("div", {
+                      style: {
+                        padding: 8,
+                        background: u.yellow + "12",
+                        borderRadius: 6,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      },
+                      children: [
+                        l.jsx("div", {
+                          style: { fontSize: 11, color: u.text2 },
+                          children:
+                            "Not sure if this is a direct expense or a contractor payment.",
+                        }),
+                        l.jsx(D, {
+                          label: "Record as",
+                          value: Xf.syncChoice,
+                          onChange: (b) =>
+                            Qf((fe) => ({ ...fe, syncChoice: b })),
+                          opts: [
+                            { v: "paid_only", l: "Direct expense only" },
+                            {
+                              v: "sync",
+                              l: `Contractor payment (${(v == null ? void 0 : v.name) || "contractor"})`,
+                            },
+                          ],
+                        }),
+                      ],
+                    }),
+                  l.jsx(D, {
+                    label: "Payment Date",
+                    type: "date",
+                    value: wu(Xf.paidDate) || Xf.paidDate,
+                    onChange: (b) => Qf((fe) => ({ ...fe, paidDate: b })),
+                  }),
+                  l.jsx(D, {
+                    label: "Method",
+                    value: Xf.method,
+                    onChange: (b) => Qf((fe) => ({ ...fe, method: b })),
+                    opts: [
+                      { v: "", l: "—" },
+                      { v: "Check", l: "Check" },
+                      { v: "Wire", l: "Wire" },
+                      { v: "Zelle", l: "Zelle" },
+                      { v: "Cash", l: "Cash" },
+                      { v: "CC", l: "Credit Card" },
+                    ],
+                  }),
+                  l.jsx(D, {
+                    label: "Confirmation #",
+                    value: Xf.conf,
+                    onChange: (b) => Qf((fe) => ({ ...fe, conf: b })),
+                  }),
+                  l.jsx(D, {
+                    label: "Notes",
+                    value: Xf.notes,
+                    onChange: (b) => Qf((fe) => ({ ...fe, notes: b })),
+                    ph: "Optional payment notes",
+                  }),
+                  l.jsxs("div", {
+                    style: {
+                      display: "flex",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    },
+                    children: [
+                      l.jsx(H, {
+                        onClick: () => nd("paid"),
+                        v: "success",
+                        icon: ts,
+                        children:
+                          g.status === "paid" ? "Save Payment" : "Mark Paid",
+                      }),
+                      g.status === "paid" &&
+                        l.jsx(H, {
+                          onClick: () => nd("pending"),
+                          v: "secondary",
+                          children: "Mark as Pending",
+                        }),
+                    ],
+                  }),
+                ],
+              }),
+            });
+          })(),
         ko && l.jsx(hu, { doc: ko, onClose: () => To(null) }),
         B,
       ],
@@ -4566,6 +6675,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       coFile = Bc(),
       origFile = Bc(),
       j = (z, w, L, ee) => {
+        if (PcStop(r, n, d)) return;
         (o((te) =>
           te.map(($) =>
             $.id === z
@@ -4590,11 +6700,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       E = (n ? e.filter((z) => z.pid === n) : e).sort(
         (z, w) => new Date(w.date) - new Date(z.date),
       ),
-      M = (z) =>
+      M = (z) => {
+        if (PcStop(r, n, d)) return;
         c("למחוק תשלום זה?", () => {
           (t((w) => w.filter((L) => L.id !== z)), d("תשלום נמחק ✅"));
-        }),
+        });
+      },
       Xe = () => {
+        if (PcStop(r, n, d)) return;
         Se &&
           Se.date &&
           Se.to &&
@@ -4646,11 +6759,13 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       en = Jt.filter((z) => z.status === "pending"),
       tn = Rt ? W + Zt : 0,
       nn = Rt ? tn - F : 0,
+      PcLk = Pc(r, n),
       rn = (z) => {
         n &&
           rSet((w) => w.map((L) => (L.id === n ? z(L) : L)));
       },
       on = (z) => {
+        if (PcStop(r, n, d)) return;
         pn(z ? "edit" : "add");
         _n(
           z
@@ -4673,6 +6788,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         );
       },
       sn = () => {
+        if (PcStop(r, n, d)) return;
         if (!(yn != null && yn.title.trim()))
           return void d("נא למלא כותרת");
         const z = {
@@ -4753,6 +6869,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           .filter((w) => !n || w.phId),
       ),
       ue = (z, w, L) => {
+        if (PcStop(r, n, d)) return;
         const ee = i.find((te) => te.id === z),
           $ = ee == null ? void 0 : (ee.pmts || []).find((Q) => Q.id === w);
         (o((te) =>
@@ -4806,9 +6923,26 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               style: { fontSize: 20, fontWeight: 700 },
               children: se.budget,
             }),
-            l.jsx(H, { icon: Ce, onClick: () => m(!0), children: "הוסף" }),
+            !PcLk && l.jsx(H, { icon: Ce, onClick: () => m(!0), children: "הוסף" }),
           ],
         }),
+        PcLk &&
+          l.jsxs("div", {
+            style: {
+              marginBottom: 12,
+              padding: "10px 14px",
+              background: u.yellow + "15",
+              border: `1px solid ${u.yellow}40`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: u.text2,
+            },
+            children: [
+              "🔒 ",
+              PcMsg,
+              PfDate(le) ? ` (Finished: ${PfDate(le)})` : "",
+            ],
+          }),
         l.jsxs("div", {
           style: {
             display: "grid",
@@ -4891,31 +7025,33 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsxs("div", {
                     style: { display: "flex", gap: 6 },
                     children: [
-                      l.jsx(H, {
-                        sz: "sm",
-                        icon: pi,
-                        onClick: () => {
-                          (No({
-                            amt: String(W),
-                            contractDate:
-                              (le == null ? void 0 : le.contractDate) ||
-                              (le == null ? void 0 : le.startDate) ||
-                              "",
-                            contractScopeNotes:
-                              (le == null
-                                ? void 0
-                                : le.contractScopeNotes) || "",
-                          }),
-                            dnOrig(!0));
-                        },
-                        children: "ערוך חוזה",
-                      }),
-                      l.jsx(H, {
-                        sz: "sm",
-                        icon: Ce,
-                        onClick: () => on(),
-                        children: "שינוי הזמנה",
-                      }),
+                      !PcLk &&
+                        l.jsx(H, {
+                          sz: "sm",
+                          icon: pi,
+                          onClick: () => {
+                            (No({
+                              amt: String(W),
+                              contractDate:
+                                (le == null ? void 0 : le.contractDate) ||
+                                (le == null ? void 0 : le.startDate) ||
+                                "",
+                              contractScopeNotes:
+                                (le == null
+                                  ? void 0
+                                  : le.contractScopeNotes) || "",
+                            }),
+                              dnOrig(!0));
+                          },
+                          children: "ערוך חוזה",
+                        }),
+                      !PcLk &&
+                        l.jsx(H, {
+                          sz: "sm",
+                          icon: Ce,
+                          onClick: () => on(),
+                          children: "שינוי הזמנה",
+                        }),
                     ],
                   }),
                 ],
@@ -5012,26 +7148,28 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             l.jsxs("div", {
                               style: { display: "flex", gap: 4 },
                               children: [
-                                l.jsx(H, {
-                                  sz: "sm",
-                                  onClick: () => on(z),
-                                  children: "✏️",
-                                }),
-                                l.jsx(H, {
-                                  sz: "sm",
-                                  v: "danger",
-                                  onClick: () =>
-                                    c("למחוק שינוי הזמנה זה?", () => {
-                                      (rn((w) => ({
-                                        ...w,
-                                        changeOrders: (
-                                          w.changeOrders || []
-                                        ).filter((L) => L.id !== z.id),
-                                      })),
-                                        d("שינוי הזמנה נמחק ✅"));
-                                    }),
-                                  children: "🗑️",
-                                }),
+                                !PcLk &&
+                                  l.jsx(H, {
+                                    sz: "sm",
+                                    onClick: () => on(z),
+                                    children: "✏️",
+                                  }),
+                                !PcLk &&
+                                  l.jsx(H, {
+                                    sz: "sm",
+                                    v: "danger",
+                                    onClick: () =>
+                                      c("למחוק שינוי הזמנה זה?", () => {
+                                        (rn((w) => ({
+                                          ...w,
+                                          changeOrders: (
+                                            w.changeOrders || []
+                                          ).filter((L) => L.id !== z.id),
+                                        })),
+                                          d("שינוי הזמנה נמחק ✅"));
+                                      }),
+                                    children: "🗑️",
+                                  }),
                               ],
                             }),
                           ],
@@ -5090,26 +7228,28 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       l.jsxs("div", {
                         style: { display: "flex", gap: 4 },
                         children: [
-                          l.jsx(H, {
-                            sz: "sm",
-                            onClick: () => on(z),
-                            children: "✏️",
-                          }),
-                          l.jsx(H, {
-                            sz: "sm",
-                            v: "danger",
-                            onClick: () =>
-                              c("למחוק שינוי הזמנה זה?", () => {
-                                (rn((w) => ({
-                                  ...w,
-                                  changeOrders: (
-                                    w.changeOrders || []
-                                  ).filter((L) => L.id !== z.id),
-                                })),
-                                  d("שינוי הזמנה נמחק ✅"));
-                              }),
-                            children: "🗑️",
-                          }),
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              onClick: () => on(z),
+                              children: "✏️",
+                            }),
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              v: "danger",
+                              onClick: () =>
+                                c("למחוק שינוי הזמנה זה?", () => {
+                                  (rn((w) => ({
+                                    ...w,
+                                    changeOrders: (
+                                      w.changeOrders || []
+                                    ).filter((L) => L.id !== z.id),
+                                  })),
+                                    d("שינוי הזמנה נמחק ✅"));
+                                }),
+                              children: "🗑️",
+                            }),
                         ],
                       }),
                     ],
@@ -5176,43 +7316,46 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       l.jsxs("div", {
                         style: { display: "flex", gap: 4 },
                         children: [
-                          l.jsx(H, {
-                            sz: "sm",
-                            onClick: () =>
-                              p({
-                                ...z,
-                                newAmt: String(z.amt),
-                                newMilestone: z.milestone,
-                              }),
-                            children: "✏️",
-                          }),
-                          l.jsx(H, {
-                            sz: "sm",
-                            v: "danger",
-                            onClick: () =>
-                              c("למחוק תשלום ממתין?", () => {
-                                (o((w) =>
-                                  w.map((L) =>
-                                    L.id === z.conId
-                                      ? {
-                                          ...L,
-                                          pmts: (L.pmts || []).filter(
-                                            (ee) => ee.id !== z.id,
-                                          ),
-                                        }
-                                      : L,
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              onClick: () =>
+                                p({
+                                  ...z,
+                                  newAmt: String(z.amt),
+                                  newMilestone: z.milestone,
+                                }),
+                              children: "✏️",
+                            }),
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              v: "danger",
+                              onClick: () =>
+                                c("למחוק תשלום ממתין?", () => {
+                                  (o((w) =>
+                                    w.map((L) =>
+                                      L.id === z.conId
+                                        ? {
+                                            ...L,
+                                            pmts: (L.pmts || []).filter(
+                                              (ee) => ee.id !== z.id,
+                                            ),
+                                          }
+                                        : L,
+                                    ),
                                   ),
-                                ),
-                                  d("תשלום נמחק ✅"));
-                              }),
-                            children: "🗑️",
-                          }),
-                          l.jsx(H, {
-                            sz: "sm",
-                            v: "success",
-                            onClick: () => C({ ...z }),
-                            children: "שולם",
-                          }),
+                                    d("תשלום נמחק ✅"));
+                                }),
+                              children: "🗑️",
+                            }),
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              v: "success",
+                              onClick: () => C({ ...z }),
+                              children: "שולם",
+                            }),
                         ],
                       }),
                     ],
@@ -5269,7 +7412,23 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             fontSize: 12,
                             fontWeight: 500,
                           },
-                          children: z.to,
+                          children: z.description
+                            ? l.jsxs("div", {
+                                children: [
+                                  l.jsx("div", {
+                                    style: { fontWeight: 600 },
+                                    children: Af(z),
+                                  }),
+                                  l.jsx("div", {
+                                    style: {
+                                      fontSize: 10,
+                                      color: u.text3,
+                                    },
+                                    children: z.to || z.vendor,
+                                  }),
+                                ],
+                              })
+                            : z.to,
                         }),
                         l.jsx("td", {
                           style: {
@@ -5301,38 +7460,40 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           children: l.jsxs("div", {
                             style: { display: "flex", gap: 2 },
                             children: [
-                              l.jsx("button", {
-                                onClick: () =>
-                                  _e({
-                                    ...z,
-                                    amt: String(z.amt),
-                                    notes: z.notes || "",
-                                    conf: z.conf || "",
-                                    phId: z.phId || "",
-                                    cat: z.cat || "",
-                                  }),
-                                style: {
-                                  background: "none",
-                                  border: "none",
-                                  cursor: "pointer",
-                                  color: u.text3,
-                                  padding: 2,
-                                },
-                                title: "ערוך תשלום",
-                                children: l.jsx(pi, { size: 12 }),
-                              }),
-                              l.jsx("button", {
-                                onClick: () => M(z.id),
-                                style: {
-                                  background: "none",
-                                  border: "none",
-                                  cursor: "pointer",
-                                  color: u.text3,
-                                  padding: 2,
-                                },
-                                title: "מחק תשלום",
-                                children: l.jsx(Pe, { size: 12 }),
-                              }),
+                              !PcLk &&
+                                l.jsx("button", {
+                                  onClick: () =>
+                                    _e({
+                                      ...z,
+                                      amt: String(z.amt),
+                                      notes: z.notes || "",
+                                      conf: z.conf || "",
+                                      phId: z.phId || "",
+                                      cat: z.cat || "",
+                                    }),
+                                  style: {
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    color: u.text3,
+                                    padding: 2,
+                                  },
+                                  title: "ערוך תשלום",
+                                  children: l.jsx(pi, { size: 12 }),
+                                }),
+                              !PcLk &&
+                                l.jsx("button", {
+                                  onClick: () => M(z.id),
+                                  style: {
+                                    background: "none",
+                                    border: "none",
+                                    cursor: "pointer",
+                                    color: u.text3,
+                                    padding: 2,
+                                  },
+                                  title: "מחק תשלום",
+                                  children: l.jsx(Pe, { size: 12 }),
+                                }),
                             ],
                           }),
                         }),
@@ -5459,6 +7620,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   v: "success",
                   icon: Nt,
                   onClick: () => {
+                    if (PcStop(r, n, d)) return;
                     (rn((z) => ({
                       ...z,
                       originalContract: parseFloat(Qe.amt) || 0,
@@ -5672,6 +7834,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 }),
                 l.jsx(H, {
                   onClick: () => {
+                    if (PcStop(r, n, d)) return;
                     _.amt &&
                       (t((z) => [
                         ...z,
@@ -5891,6 +8054,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     setContacts: t,
     type: n,
     cp: r,
+    projs: pj,
     phases: i,
     showToast: o,
     pays: s,
@@ -5927,6 +8091,36 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       [$, Q] = T.useState(""),
       [q, oe] = T.useState(""),
       [ko, To] = T.useState(null),
+      [Sl, _Sl] = T.useState(""),
+      [Cl, _Cl] = T.useState(""),
+      [ec, tc] = T.useState(!1),
+      [nc, rc] = T.useState({
+        date: "",
+        vendor: "",
+        description: "",
+        cat: "materials",
+        amt: "",
+        notes: "",
+        stageId: "",
+      }),
+      [jc, _jc] = T.useState(null),
+      [co, fo] = T.useState({
+        paidDate: "",
+        method: "",
+        conf: "",
+        notes: "",
+        syncChoice: "paid_only",
+      }),
+      [wc, kc] = T.useState(null),
+      [fc, mc] = T.useState({
+        date: "",
+        vendor: "",
+        description: "",
+        cat: "materials",
+        amt: "",
+        notes: "",
+        stageId: "",
+      }),
       Ie = T.useRef(null),
       pt = ul(),
       ge = n === "contractors",
@@ -5993,6 +8187,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         });
       },
       Ve = () => {
+        if (PcStop(pj, r, o)) return;
         if (!E.title || !a) return;
         const S = {
           id: ve(),
@@ -6003,6 +8198,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           status: "active",
           price: parseFloat(E.price) || 0,
           stages: [],
+          costs: [],
         };
         (de(a.id, (N) => ({ ...N, scopes: [...(N.scopes || []), S] })),
           M({ title: "", desc: "", phId: "", price: "" }),
@@ -6010,6 +8206,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           o("Scope נוסף ✅"));
       },
       fr = (S) => {
+        if (PcStop(pj, r, o)) return;
         p("למחוק scope זה?", () => {
           (de(a.id, (N) => ({
             ...N,
@@ -6019,6 +8216,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         });
       },
       hr = () => {
+        if (PcStop(pj, r, o)) return;
         try {
           if (!a) return;
           const N = parseFloat(String(B.amt).replace(/,/g, ""));
@@ -6078,6 +8276,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         }
       },
       mr = (S) => {
+        if (PcStop(pj, r, o)) return;
         p("למחוק תשלום?", () => {
           (de(a.id, (N) => ({
             ...N,
@@ -6088,6 +8287,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         });
       },
       gr = (S) => {
+        if (PcStop(pj, r, o)) return;
         const N = (a.pmts || []).find((K) => K.id === S),
           K = new Date().toISOString().split("T")[0];
         (de(a.id, (X) => ({
@@ -6178,7 +8378,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             Y.id === S ? { ...Y, [N]: K } : Y,
           ),
         })),
-      fe = (S) =>
+      fe = (S) => {
+        if (PcStop(pj, r, o)) return;
         de(a.id, (N) => ({
           ...N,
           scopes: (N.scopes || []).map((K) =>
@@ -6186,7 +8387,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               ? { ...K, status: K.status === "active" ? "off" : "active" }
               : K,
           ),
-        })),
+        }));
+      },
       $e = Vt((S) => {
         (de(a.id, (N) => ({
           ...N,
@@ -6267,9 +8469,135 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             o("קבלה הוסרה ✅"));
         });
       },
+      Io = () => {
+        if (PcStop(pj, r, o)) return;
+        if (!a || !Sl) {
+          alert("Please select a scope first.");
+          return;
+        }
+        const S = (a.scopes || []).find((K) => K.id === Sl),
+          N = Lu(nc.amt);
+        if (!nc.vendor.trim() || !nc.description.trim() || N == null) {
+          alert(
+            "Please enter a vendor, description, and non-zero amount (use negative for refunds).",
+          );
+          return;
+        }
+        const K = Vf(nc.vendor, nc.description, nc.cat, N, {
+          pid: r || (S == null ? void 0 : S.pid) || "p1",
+          phId: (S == null ? void 0 : S.phId) || "",
+          scopeId: Sl,
+          stageId: nc.stageId || "",
+          contractorId: a.id,
+          date: nc.date,
+          notes: nc.notes,
+        });
+        (d((X) => [...X, K]),
+          tc(!1),
+          rc({
+            date: "",
+            vendor: "",
+            description: "",
+            cat: "materials",
+            amt: "",
+            notes: "",
+            stageId: "",
+          }),
+          o("Cost added ✅"));
+      },
+      Do = (S, N) => {
+        if (PcStop(pj, r, o)) return;
+        const pay = s.find((K) => K.id === N.id) || N;
+        (fo(em(pay)),
+          _jc({
+            scopeId: S,
+            costId: N.id,
+            syncHint: Fu(pay.amt)
+              ? "paid_only"
+              : xf(
+                  pay.vendor,
+                  pay.costCat || pay.cat,
+                  a,
+                  pay.pmtId,
+                  pay.description,
+                ),
+          }));
+      },
+      Qo = (S) => {
+        if (PcStop(pj, r, o)) return;
+        if (!a || !jc || !d) return;
+        const syncContacts = (fn) =>
+          t((K) => {
+            const X = fn(K);
+            (a == null ? void 0 : a.id) &&
+              X.find((Y) => Y.id === a.id) &&
+              c(X.find((Y) => Y.id === a.id));
+            return X;
+          });
+        ($f(
+          syncContacts,
+          d,
+          e,
+          s,
+          jc.costId,
+          jc.syncHint,
+          { ...co, status: S || "paid" },
+          o,
+        ),
+          _jc(null));
+      },
+      Ro = (S, N) => {
+        if (PcStop(pj, r, o)) return;
+        p("Delete this cost?", () => {
+          (d((K) => K.filter((X) => X.id !== N)), o("Cost deleted ✅"));
+        });
+      },
+      gd = (S) => {
+        if (PcStop(pj, r, o)) return;
+        const N = s.find((K) => K.id === S.id) || S,
+          K = Nf(N);
+        (N.scopeId && _Sl(N.scopeId),
+          mc({
+            date: N.date || "",
+            vendor: K.vendor,
+            description: K.description,
+            cat: K.cat,
+            amt: String(N.amt ?? ""),
+            notes: K.notes || "",
+            stageId: K.stageId || "",
+          }),
+          kc(S.id));
+      },
+      bd = () => {
+        if (PcStop(pj, r, o)) return;
+        if (!wc) return;
+        const syncContacts = (N) =>
+          t((K) => {
+            const X = N(K);
+            (a == null ? void 0 : a.id) &&
+              X.find((Y) => Y.id === a.id) &&
+              c(X.find((Y) => Y.id === a.id));
+            return X;
+          });
+        _p(d, syncContacts, e, s, wc, fc, o)
+          ? kc(null)
+          : alert(
+              "Please enter a vendor, description, and non-zero amount (use negative for refunds).",
+            );
+      },
       Xe = ((a == null ? void 0 : a.scopes) || []).flatMap((S) =>
         (S.stages || []).map((N) => ({ ...N, scopeTitle: S.title })),
-      );
+      ),
+      PcLk = Pc(pj, r);
+    T.useEffect(() => {
+      (_Sl(""), _Cl(""));
+    }, [a == null ? void 0 : a.id]);
+    T.useEffect(() => {
+      f === "costs" &&
+        a &&
+        (a.scopes || []).length &&
+        _Sl((S) => S || a.scopes[0].id);
+    }, [f, a]);
     return l.jsxs("div", {
       children: [
         l.jsxs("div", {
@@ -6287,6 +8615,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             l.jsx(H, { icon: Ce, onClick: () => _(!0), children: "הוסף" }),
           ],
         }),
+        PcLk &&
+          l.jsxs("div", {
+            style: {
+              marginBottom: 12,
+              padding: "10px 14px",
+              background: u.yellow + "15",
+              border: `1px solid ${u.yellow}40`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: u.text2,
+            },
+            children: ["🔒 ", PcMsg],
+          }),
         l.jsx("div", {
           style: {
             display: "grid",
@@ -6397,6 +8738,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                         { id: "details", label: "פרטים" },
                         { id: "scopes", label: "Scope of Work" },
                         { id: "payments", label: "תשלומים" },
+                        { id: "costs", label: "Costs" },
                         { id: "documents", label: "מסמכים" },
                       ],
                       act: f,
@@ -6538,12 +8880,13 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 style: { fontSize: 14, fontWeight: 700 },
                                 children: "Scope of Work",
                               }),
-                              l.jsx(H, {
-                                sz: "sm",
-                                icon: Ce,
-                                onClick: () => h(!0),
-                                children: "+ New Scope",
-                              }),
+                              !PcLk &&
+                                l.jsx(H, {
+                                  sz: "sm",
+                                  icon: Ce,
+                                  onClick: () => h(!0),
+                                  children: "+ New Scope",
+                                }),
                             ],
                           }),
                           (a.scopes || []).map((S) => {
@@ -6645,62 +8988,65 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                           flexShrink: 0,
                                         },
                                         children: [
-                                          l.jsx("button", {
-                                            onClick: () => fe(S.id),
-                                            style: {
-                                              padding: "3px 10px",
-                                              borderRadius: 12,
-                                              border: `1px solid ${S.status === "active" ? u.green : u.text3}`,
-                                              background:
+                                          !PcLk &&
+                                            l.jsx("button", {
+                                              onClick: () => fe(S.id),
+                                              style: {
+                                                padding: "3px 10px",
+                                                borderRadius: 12,
+                                                border: `1px solid ${S.status === "active" ? u.green : u.text3}`,
+                                                background:
+                                                  S.status === "active"
+                                                    ? u.green + "15"
+                                                    : "transparent",
+                                                color:
+                                                  S.status === "active"
+                                                    ? u.green
+                                                    : u.text3,
+                                                fontSize: 10,
+                                                fontWeight: 600,
+                                                cursor: "pointer",
+                                              },
+                                              children:
                                                 S.status === "active"
-                                                  ? u.green + "15"
-                                                  : "transparent",
-                                              color:
-                                                S.status === "active"
-                                                  ? u.green
-                                                  : u.text3,
-                                              fontSize: 10,
-                                              fontWeight: 600,
-                                              cursor: "pointer",
-                                            },
-                                            children:
-                                              S.status === "active"
-                                                ? "Active"
-                                                : "Off",
-                                          }),
-                                          l.jsx("button", {
-                                            onClick: () =>
-                                              ue(A === S.id ? null : S.id),
-                                            style: {
-                                              width: 28,
-                                              height: 28,
-                                              display: "flex",
-                                              alignItems: "center",
-                                              justifyContent: "center",
-                                              background: u.accent + "10",
-                                              border: "none",
-                                              borderRadius: 6,
-                                              cursor: "pointer",
-                                              color: u.accent,
-                                            },
-                                            title: "Edit",
-                                            children: l.jsx(pi, { size: 12 }),
-                                          }),
-                                          l.jsx("button", {
-                                            onClick: () => fr(S.id),
-                                            style: {
-                                              width: 28,
-                                              height: 28,
-                                              display: "flex",
-                                              alignItems: "center",
-                                              justifyContent: "center",
-                                              background: u.red + "10",
-                                              border: "none",
-                                              borderRadius: 6,
-                                              cursor: "pointer",
-                                              color: u.red,
-                                            },
-                                            title: "Delete",
+                                                  ? "Active"
+                                                  : "Off",
+                                            }),
+                                          !PcLk &&
+                                            l.jsx("button", {
+                                              onClick: () =>
+                                                ue(A === S.id ? null : S.id),
+                                              style: {
+                                                width: 28,
+                                                height: 28,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                background: u.accent + "10",
+                                                border: "none",
+                                                borderRadius: 6,
+                                                cursor: "pointer",
+                                                color: u.accent,
+                                              },
+                                              title: "Edit",
+                                              children: l.jsx(pi, { size: 12 }),
+                                            }),
+                                          !PcLk &&
+                                            l.jsx("button", {
+                                              onClick: () => fr(S.id),
+                                              style: {
+                                                width: 28,
+                                                height: 28,
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "center",
+                                                background: u.red + "10",
+                                                border: "none",
+                                                borderRadius: 6,
+                                                cursor: "pointer",
+                                                color: u.red,
+                                              },
+                                              title: "Delete",
                                             children: l.jsx(Pe, { size: 12 }),
                                           }),
                                         ],
@@ -7286,21 +9632,22 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                   style: { fontSize: 14, fontWeight: 700 },
                                   children: "Payment Schedule",
                                 }),
-                                l.jsx(H, {
-                                  sz: "sm",
-                                  icon: Ce,
-                                  onClick: () => {
-                                    (V({
-                                      amt: "",
-                                      due: "",
-                                      milestone: "",
-                                      linkedStage: "",
-                                      scopeId: "",
-                                    }),
-                                      F(!0));
-                                  },
-                                  children: "+ Add Payment",
-                                }),
+                                !PcLk &&
+                                  l.jsx(H, {
+                                    sz: "sm",
+                                    icon: Ce,
+                                    onClick: () => {
+                                      (V({
+                                        amt: "",
+                                        due: "",
+                                        milestone: "",
+                                        linkedStage: "",
+                                        scopeId: "",
+                                      }),
+                                        F(!0));
+                                    },
+                                    children: "+ Add Payment",
+                                  }),
                               ],
                             }),
                             l.jsxs("div", {
@@ -7730,6 +10077,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                               l.jsx("td", {
                                                 style: { padding: "7px 8px" },
                                                 children:
+                                                  !PcLk &&
                                                   Y.status !== "paid" &&
                                                   l.jsxs(l.Fragment, {
                                                     children: [
@@ -7787,24 +10135,26 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                               }),
                                               l.jsx("td", {
                                                 style: { padding: "7px 8px" },
-                                                children: l.jsx("button", {
-                                                  onClick: () => mr(Y.id),
-                                                  style: {
-                                                    display: "flex",
-                                                    alignItems: "center",
-                                                    justifyContent: "center",
-                                                    width: 24,
-                                                    height: 24,
-                                                    background: u.red + "10",
-                                                    border: "none",
-                                                    borderRadius: 5,
-                                                    cursor: "pointer",
-                                                    color: u.red,
-                                                  },
-                                                  children: l.jsx(Pe, {
-                                                    size: 11,
+                                                children:
+                                                  !PcLk &&
+                                                  l.jsx("button", {
+                                                    onClick: () => mr(Y.id),
+                                                    style: {
+                                                      display: "flex",
+                                                      alignItems: "center",
+                                                      justifyContent: "center",
+                                                      width: 24,
+                                                      height: 24,
+                                                      background: u.red + "10",
+                                                      border: "none",
+                                                      borderRadius: 5,
+                                                      cursor: "pointer",
+                                                      color: u.red,
+                                                    },
+                                                    children: l.jsx(Pe, {
+                                                      size: 11,
+                                                    }),
                                                   }),
-                                                }),
                                               }),
                                             ],
                                           },
@@ -7838,6 +10188,490 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 children: "שמור",
                               }),
                             }),
+                          ],
+                        });
+                      })(),
+                    f === "costs" &&
+                      (() => {
+                        const S = (a.scopes || []).find((ie) => ie.id === Sl),
+                          K = Bf(s, r, Sl, Cl),
+                          X = _f(K),
+                          hn = S ? S.stages || [] : [];
+                        return l.jsxs("div", {
+                          style: {
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 10,
+                          },
+                          children: [
+                            l.jsxs("div", {
+                              style: {
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                flexWrap: "wrap",
+                                gap: 8,
+                              },
+                              children: [
+                                l.jsx("span", {
+                                  style: { fontSize: 14, fontWeight: 700 },
+                                  children: "Stage Costs",
+                                }),
+                                !PcLk &&
+                                  l.jsx(H, {
+                                    sz: "sm",
+                                    icon: Ce,
+                                    onClick: () => {
+                                      if (!(a.scopes || []).length)
+                                        return alert(
+                                          "Add a Scope of Work first.",
+                                        );
+                                      (Sl ||
+                                        _Sl((a.scopes || [])[0].id),
+                                        rc({
+                                          date: new Date()
+                                            .toISOString()
+                                            .split("T")[0],
+                                          vendor: "",
+                                          description: "",
+                                          cat: "materials",
+                                          amt: "",
+                                          notes: "",
+                                          stageId: Cl || "",
+                                        }),
+                                        tc(!0));
+                                    },
+                                    children: "+ Add Cost",
+                                  }),
+                              ],
+                            }),
+                            l.jsx("p", {
+                              style: { fontSize: 11, color: u.text2, margin: 0 },
+                              children:
+                                "Track actual stage expenses (materials, labor, misc). Contract payments stay on the Payments tab.",
+                            }),
+                            l.jsxs("div", {
+                              style: {
+                                display: "grid",
+                                gridTemplateColumns: pt ? "1fr" : "1fr 1fr",
+                                gap: 8,
+                              },
+                              children: [
+                                l.jsx(D, {
+                                  label: "Scope of Work",
+                                  value: Sl,
+                                  onChange: (ie) => {
+                                    (_Sl(ie), _Cl(""));
+                                  },
+                                  opts: [
+                                    { v: "", l: "-- Select scope --" },
+                                    ...(a.scopes || []).map((ie) => ({
+                                      v: ie.id,
+                                      l: `${ie.title || ie.desc} ($${(Number(ie.price) || 0).toLocaleString()})`,
+                                    })),
+                                  ],
+                                }),
+                                l.jsx(D, {
+                                  label: "Stage (optional)",
+                                  value: Cl,
+                                  onChange: (ie) => _Cl(ie),
+                                  opts: [
+                                    { v: "", l: "All stages in scope" },
+                                    ...hn.map((ie) => ({
+                                      v: ie.id,
+                                      l: ie.name,
+                                    })),
+                                  ],
+                                }),
+                              ],
+                            }),
+                            !(a.scopes || []).length
+                              ? l.jsx("div", {
+                                  style: {
+                                    fontSize: 11,
+                                    color: u.text3,
+                                    textAlign: "center",
+                                    padding: 16,
+                                  },
+                                  children:
+                                    "Add a Scope of Work first, then track costs here.",
+                                })
+                              : !S
+                                ? l.jsx("div", {
+                                    style: {
+                                      fontSize: 11,
+                                      color: u.text3,
+                                      textAlign: "center",
+                                      padding: 16,
+                                    },
+                                    children: "Select a scope to view costs.",
+                                  })
+                                : K.length > 0
+                                  ? l.jsxs("table", {
+                                      style: {
+                                        width: "100%",
+                                        borderCollapse: "collapse",
+                                        background: u.card,
+                                        borderRadius: 8,
+                                        overflow: "hidden",
+                                        border: `1px solid ${u.border}`,
+                                      },
+                                      children: [
+                                        l.jsx("thead", {
+                                          children: l.jsx("tr", {
+                                            style: {
+                                              borderBottom: `1px solid ${u.border}`,
+                                              background: u.card2,
+                                            },
+                                            children: [
+                                              "Date",
+                                              "Description",
+                                              "Vendor",
+                                              "Category",
+                                              "Stage",
+                                              "Status",
+                                              "Amount",
+                                              "",
+                                            ].map((ie, gn) =>
+                                              l.jsx(
+                                                "th",
+                                                {
+                                                  style: {
+                                                    padding: "6px 8px",
+                                                    fontSize: 10,
+                                                    fontWeight: 600,
+                                                    color: u.text3,
+                                                    textAlign:
+                                                      gn === 6 ? "right" : "left",
+                                                  },
+                                                  children: ie,
+                                                },
+                                                ie,
+                                              ),
+                                            ),
+                                          }),
+                                        }),
+                                        l.jsx("tbody", {
+                                          children: K.map((ie) =>
+                                            l.jsxs(
+                                              "tr",
+                                              {
+                                                style: {
+                                                  borderBottom: `1px solid ${u.border}`,
+                                                },
+                                                children: [
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 11,
+                                                    },
+                                                    children: ie.date || "—",
+                                                  }),
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 11,
+                                                      fontWeight: 600,
+                                                    },
+                                                    children: l.jsxs("div", {
+                                                      style: {
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: 4,
+                                                        flexWrap: "wrap",
+                                                      },
+                                                      children: [
+                                                        Fu(ie.amt) &&
+                                                          l.jsx("span", {
+                                                            style: {
+                                                              fontSize: 9,
+                                                              fontWeight: 600,
+                                                              padding: "2px 6px",
+                                                              borderRadius: 4,
+                                                              background:
+                                                                u.green + "18",
+                                                              color: u.green,
+                                                            },
+                                                            children: "Refund",
+                                                          }),
+                                                        l.jsx("span", {
+                                                          style: {
+                                                            color: Fu(ie.amt)
+                                                              ? u.green
+                                                              : u.text,
+                                                          },
+                                                          children: Af(ie),
+                                                        }),
+                                                      ],
+                                                    }),
+                                                  }),
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 10,
+                                                      color: u.text3,
+                                                    },
+                                                    children: ie.vendor || "—",
+                                                  }),
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 10,
+                                                    },
+                                                    children:
+                                                      (mf.find(
+                                                        (gn) =>
+                                                          gn.v === ie.cat,
+                                                      ) || {}).l || ie.cat,
+                                                  }),
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 10,
+                                                      color: u.text3,
+                                                    },
+                                                    children: kf(hn, ie.stageId),
+                                                  }),
+                                                  l.jsx("td", {
+                                                    onClick:
+                                                      ie.status === "paid"
+                                                        ? () => Do(S.id, ie)
+                                                        : void 0,
+                                                    title:
+                                                      ie.status === "paid"
+                                                        ? "Edit payment details"
+                                                        : void 0,
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 10,
+                                                      cursor:
+                                                        ie.status === "paid"
+                                                          ? "pointer"
+                                                          : "default",
+                                                    },
+                                                    children: l.jsxs("div", {
+                                                      style: {
+                                                        display: "flex",
+                                                        flexDirection: "column",
+                                                        gap: 2,
+                                                      },
+                                                      children: [
+                                                        l.jsx("span", {
+                                                          style: {
+                                                            display: "inline-block",
+                                                            padding: "2px 6px",
+                                                            borderRadius: 4,
+                                                            fontSize: 9,
+                                                            fontWeight: 600,
+                                                            background:
+                                                              ie.status === "paid"
+                                                                ? u.green + "18"
+                                                                : u.yellow + "18",
+                                                            color:
+                                                              ie.status === "paid"
+                                                                ? u.green
+                                                                : u.yellow,
+                                                            textDecoration:
+                                                              ie.status === "paid"
+                                                                ? "underline"
+                                                                : "none",
+                                                          },
+                                                          children:
+                                                            ie.status === "paid"
+                                                              ? "Paid"
+                                                              : "Pending",
+                                                        }),
+                                                        ie.status === "paid" &&
+                                                          ie.paidDate &&
+                                                          l.jsx("span", {
+                                                            style: {
+                                                              fontSize: 9,
+                                                              color: u.text3,
+                                                              textDecoration:
+                                                                "underline",
+                                                            },
+                                                            children: ie.paidDate,
+                                                          }),
+                                                      ],
+                                                    }),
+                                                  }),
+                                                  l.jsxs("td", {
+                                                    style: {
+                                                      padding: "6px 8px",
+                                                      fontSize: 11,
+                                                      fontWeight: 600,
+                                                      fontFamily:
+                                                        "'JetBrains Mono'",
+                                                      textAlign: "right",
+                                                      color: Fu(ie.amt)
+                                                          ? u.green
+                                                          : u.text,
+                                                    },
+                                                    children: [
+                                                      Fu(ie.amt) ? "-" : "",
+                                                      "$",
+                                                      Math.abs(
+                                                        Number(ie.amt) || 0,
+                                                      ).toLocaleString(),
+                                                    ],
+                                                  }),
+                                                  l.jsx("td", {
+                                                    style: {
+                                                      padding: "4px 6px",
+                                                      textAlign: "right",
+                                                    },
+                                                    children: l.jsxs("div", {
+                                                      style: {
+                                                        display: "flex",
+                                                        gap: 4,
+                                                        justifyContent: "flex-end",
+                                                        alignItems: "center",
+                                                      },
+                                                      children: [
+                                                        !PcLk &&
+                                                          ie.status !== "paid" &&
+                                                          l.jsx(H, {
+                                                            sz: "sm",
+                                                            v: "success",
+                                                            onClick: () =>
+                                                              Do(S.id, ie),
+                                                            children: "Mark Paid",
+                                                          }),
+                                                        !PcLk &&
+                                                          l.jsx("button", {
+                                                            onClick: () => gd(ie),
+                                                            title: "Edit",
+                                                            style: {
+                                                              background: u.card2,
+                                                              border: `1px solid ${u.border}`,
+                                                              borderRadius: 5,
+                                                              padding: 4,
+                                                              cursor: "pointer",
+                                                              color: u.text2,
+                                                              display: "flex",
+                                                              alignItems: "center",
+                                                            },
+                                                            children: l.jsx(pi, {
+                                                              size: 12,
+                                                            }),
+                                                          }),
+                                                        !PcLk &&
+                                                          l.jsx("button", {
+                                                            onClick: () =>
+                                                              Ro(S.id, ie.id),
+                                                            style: {
+                                                              background:
+                                                                u.red + "10",
+                                                              border: "none",
+                                                              borderRadius: 5,
+                                                              padding: 4,
+                                                              cursor: "pointer",
+                                                              color: u.red,
+                                                            },
+                                                            children: l.jsx(Pe, {
+                                                              size: 12,
+                                                            }),
+                                                          }),
+                                                      ],
+                                                    }),
+                                                  }),
+                                                ],
+                                              },
+                                              ie.id,
+                                            ),
+                                          ),
+                                        }),
+                                      ],
+                                    })
+                                  : l.jsx("div", {
+                                      style: {
+                                        fontSize: 11,
+                                        color: u.text3,
+                                        textAlign: "center",
+                                        padding: 12,
+                                        background: u.card2,
+                                        borderRadius: 8,
+                                      },
+                                      children: "No costs yet for this scope.",
+                                    }),
+                            S &&
+                              l.jsxs("div", {
+                                style: {
+                                  marginTop: 4,
+                                  padding: 12,
+                                  background: u.card2,
+                                  borderRadius: 10,
+                                  border: `1px solid ${u.border}`,
+                                },
+                                children: [
+                                  l.jsx("div", {
+                                    style: {
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      marginBottom: 8,
+                                      color: u.text,
+                                    },
+                                    children: "Stage Cost Summary",
+                                  }),
+                                  l.jsxs("div", {
+                                    style: {
+                                      display: "grid",
+                                      gridTemplateColumns: pt
+                                        ? "1fr 1fr"
+                                        : "repeat(4,1fr)",
+                                      gap: 8,
+                                    },
+                                    children: [
+                                      [
+                                        "Materials Total",
+                                        X.materials,
+                                        u.blue,
+                                      ],
+                                      ["Labor Total", X.labor, u.accent],
+                                      ["Misc Total", X.misc, u.yellow],
+                                      ["Total Stage Cost", X.total, u.text],
+                                    ].map(([ie, gn, Qt]) =>
+                                      l.jsxs(
+                                        "div",
+                                        {
+                                          style: {
+                                            padding: 8,
+                                            background: u.card,
+                                            borderRadius: 8,
+                                            textAlign: "center",
+                                            border:
+                                              ie === "Total Stage Cost"
+                                                ? `2px solid ${u.accent}40`
+                                                : `1px solid ${u.border}`,
+                                          },
+                                          children: [
+                                            l.jsx("div", {
+                                              style: {
+                                                fontSize: 9,
+                                                color: u.text3,
+                                              },
+                                              children: ie,
+                                            }),
+                                            l.jsxs("div", {
+                                              style: {
+                                                fontSize: 14,
+                                                fontWeight: 700,
+                                                fontFamily: "'JetBrains Mono'",
+                                                color: Qt,
+                                              },
+                                              children: [
+                                                "$",
+                                                gn.toLocaleString(),
+                                              ],
+                                            }),
+                                          ],
+                                        },
+                                        ie,
+                                      ),
+                                    ),
+                                  }),
+                                ],
+                              }),
                           ],
                         });
                       })(),
@@ -8254,6 +11088,435 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               ],
             }),
           }),
+        ec &&
+          a &&
+          l.jsx(Fe, {
+            title: "Add Cost",
+            onClose: () => tc(!1),
+            w: 420,
+            children: l.jsxs("div", {
+              style: { display: "flex", flexDirection: "column", gap: 10 },
+              children: [
+                l.jsx("div", {
+                  style: {
+                    padding: 8,
+                    background: u.card2,
+                    borderRadius: 6,
+                    fontSize: 11,
+                    color: u.text2,
+                  },
+                  children:
+                    "Stage expenses (materials, labor, misc). Not contractor contract payments.",
+                }),
+                l.jsx(D, {
+                  label: "Scope of Work",
+                  value: Sl,
+                  onChange: (S) => _Sl(S),
+                  opts: (a.scopes || []).map((S) => ({
+                    v: S.id,
+                    l: S.title || S.desc,
+                  })),
+                }),
+                l.jsx(D, {
+                  label: "Stage (optional)",
+                  value: nc.stageId,
+                  onChange: (S) => rc((N) => ({ ...N, stageId: S })),
+                  opts: [
+                    { v: "", l: "— All / not stage-specific —" },
+                    ...(
+                      (a.scopes || []).find((S) => S.id === Sl)?.stages || []
+                    ).map((S) => ({ v: S.id, l: S.name })),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Category",
+                  value: nc.cat,
+                  onChange: (S) =>
+                    rc((N) => ({ ...N, cat: S, vendor: "" })),
+                  opts: mf,
+                }),
+                l.jsx(D, {
+                  label: "Vendor",
+                  value: nc.vendor,
+                  onChange: (S) => rc((N) => ({ ...N, vendor: S })),
+                  ph: Du(nc.cat, a == null ? void 0 : a.name).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: Du(nc.cat, a == null ? void 0 : a.name).map((S) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => rc((N) => ({ ...N, vendor: S })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: S,
+                      },
+                      S,
+                    ),
+                  ),
+                }),
+                l.jsx(D, {
+                  label: "Cost Description",
+                  value: nc.description,
+                  onChange: (S) => rc((N) => ({ ...N, description: S })),
+                  ph: (wf[nc.cat] || []).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: (wf[nc.cat] || []).map((S) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => rc((N) => ({ ...N, description: S })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: S,
+                      },
+                      S,
+                    ),
+                  ),
+                }),
+                l.jsxs("div", {
+                  style: {
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 8,
+                  },
+                  children: [
+                    l.jsx(D, {
+                      label: "Amount ($)",
+                      type: "number",
+                      value: nc.amt,
+                      onChange: (S) => rc((N) => ({ ...N, amt: S })),
+                      ph: "Negative for refunds (e.g. -181)",
+                    }),
+                    l.jsx(D, {
+                      label: "Date",
+                      type: "date",
+                      value: wu(nc.date) || nc.date,
+                      onChange: (S) => rc((N) => ({ ...N, date: S })),
+                    }),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Notes",
+                  value: nc.notes,
+                  onChange: (S) => rc((N) => ({ ...N, notes: S })),
+                  ph: "Optional",
+                }),
+                l.jsx(H, {
+                  onClick: Io,
+                  v: "success",
+                  icon: Ce,
+                  children: "Add Cost",
+                }),
+              ],
+            }),
+          }),
+        wc &&
+          a &&
+          l.jsx(Fe, {
+            title: "Edit Cost",
+            onClose: () => kc(null),
+            w: 420,
+            children: l.jsxs("div", {
+              style: { display: "flex", flexDirection: "column", gap: 10 },
+              children: [
+                l.jsx(D, {
+                  label: "Stage (optional)",
+                  value: fc.stageId,
+                  onChange: (S) => mc((N) => ({ ...N, stageId: S })),
+                  opts: [
+                    { v: "", l: "— All / not stage-specific —" },
+                    ...(
+                      (a.scopes || []).find(
+                        (S) =>
+                          S.id ===
+                          ((s.find((N) => N.id === wc) || {}).scopeId || Sl),
+                      )?.stages || []
+                    ).map((S) => ({ v: S.id, l: S.name })),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Category",
+                  value: fc.cat,
+                  onChange: (S) => mc((N) => ({ ...N, cat: S })),
+                  opts: mf,
+                }),
+                l.jsx(D, {
+                  label: "Vendor",
+                  value: fc.vendor,
+                  onChange: (S) => mc((N) => ({ ...N, vendor: S })),
+                  ph: Du(fc.cat, a == null ? void 0 : a.name).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: Du(fc.cat, a == null ? void 0 : a.name).map((S) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => mc((N) => ({ ...N, vendor: S })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: S,
+                      },
+                      S,
+                    ),
+                  ),
+                }),
+                l.jsx(D, {
+                  label: "Cost Description",
+                  value: fc.description,
+                  onChange: (S) => mc((N) => ({ ...N, description: S })),
+                  ph: (wf[fc.cat] || []).join(", "),
+                }),
+                l.jsx("div", {
+                  style: { display: "flex", gap: 4, flexWrap: "wrap" },
+                  children: (wf[fc.cat] || []).map((S) =>
+                    l.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        onClick: () => mc((N) => ({ ...N, description: S })),
+                        style: {
+                          padding: "3px 8px",
+                          fontSize: 10,
+                          borderRadius: 12,
+                          border: `1px solid ${u.border}`,
+                          background: u.card2,
+                          cursor: "pointer",
+                          color: u.text2,
+                        },
+                        children: S,
+                      },
+                      S,
+                    ),
+                  ),
+                }),
+                l.jsxs("div", {
+                  style: {
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 8,
+                  },
+                  children: [
+                    l.jsx(D, {
+                      label: "Amount ($)",
+                      type: "number",
+                      value: fc.amt,
+                      onChange: (S) => mc((N) => ({ ...N, amt: S })),
+                      ph: "Negative for refunds (e.g. -181)",
+                    }),
+                    l.jsx(D, {
+                      label: "Date",
+                      type: "date",
+                      value: wu(fc.date) || fc.date,
+                      onChange: (S) => mc((N) => ({ ...N, date: S })),
+                    }),
+                  ],
+                }),
+                l.jsx(D, {
+                  label: "Notes",
+                  value: fc.notes,
+                  onChange: (S) => mc((N) => ({ ...N, notes: S })),
+                  ph: "Optional",
+                }),
+                l.jsx(H, {
+                  onClick: bd,
+                  v: "success",
+                  icon: Nt,
+                  children: "Save Changes",
+                }),
+              ],
+            }),
+          }),
+        jc &&
+          a &&
+          (() => {
+            const S = (a.scopes || []).find((N) => N.id === jc.scopeId),
+              K = s.find((N) => N.id === jc.costId);
+            if (!K) return null;
+            const lr = jc.syncHint || "paid_only";
+            return l.jsx(Fe, {
+              title:
+                K.status === "paid"
+                  ? "Payment Details"
+                  : "Mark Cost Paid",
+              onClose: () => _jc(null),
+              w: 420,
+              children: l.jsxs("div", {
+                style: { display: "flex", flexDirection: "column", gap: 10 },
+                children: [
+                  l.jsxs("div", {
+                    style: {
+                      padding: 8,
+                      background: u.card2,
+                      borderRadius: 6,
+                    },
+                    children: [
+                      l.jsx("div", {
+                        style: { fontSize: 12, fontWeight: 600 },
+                        children: Af(Nf(K)),
+                      }),
+                      l.jsxs("div", {
+                        style: { fontSize: 11, color: u.text2 },
+                        children: [
+                          K.vendor,
+                          " · ",
+                          (mf.find((X) => X.v === Nf(K).cat) || {}).l ||
+                            Nf(K).cat,
+                          " — $",
+                          Math.abs(Number(K.amt) || 0).toLocaleString(),
+                          K.stageId &&
+                            l.jsxs(l.Fragment, {
+                              children: [
+                                " · ",
+                                kf(S == null ? void 0 : S.stages, K.stageId),
+                              ],
+                            }),
+                        ],
+                      }),
+                    ],
+                  }),
+                  lr === "sync" &&
+                    l.jsx("div", {
+                      style: {
+                        padding: 8,
+                        background: u.green + "12",
+                        borderRadius: 6,
+                        fontSize: 11,
+                        color: u.text2,
+                      },
+                      children: `Will also record a payment on the Payments tab for ${a.name || "this contractor"}.`,
+                    }),
+                  lr === "paid_only" &&
+                    l.jsx("div", {
+                      style: {
+                        padding: 8,
+                        background: u.card2,
+                        borderRadius: 6,
+                        fontSize: 11,
+                        color: u.text3,
+                      },
+                      children:
+                        "Supplier / direct expense — payment schedule unchanged.",
+                    }),
+                  lr === "ask" &&
+                    l.jsxs("div", {
+                      style: {
+                        padding: 8,
+                        background: u.yellow + "12",
+                        borderRadius: 6,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8,
+                      },
+                      children: [
+                        l.jsx("div", {
+                          style: { fontSize: 11, color: u.text2 },
+                          children:
+                            "Not sure if this is a direct expense or a contractor payment.",
+                        }),
+                        l.jsx(D, {
+                          label: "Record as",
+                          value: co.syncChoice,
+                          onChange: (X) =>
+                            fo((hn) => ({ ...hn, syncChoice: X })),
+                          opts: [
+                            {
+                              v: "paid_only",
+                              l: "Direct expense only",
+                            },
+                            {
+                              v: "sync",
+                              l: `Contractor payment (${a.name || "this contractor"})`,
+                            },
+                          ],
+                        }),
+                      ],
+                    }),
+                  l.jsx(D, {
+                    label: "Payment Date",
+                    type: "date",
+                    value: wu(co.paidDate) || co.paidDate,
+                    onChange: (N) => fo((X) => ({ ...X, paidDate: N })),
+                  }),
+                  l.jsx(D, {
+                    label: "Method",
+                    value: co.method,
+                    onChange: (N) => fo((X) => ({ ...X, method: N })),
+                    opts: [
+                      { v: "", l: "—" },
+                      { v: "Check", l: "Check" },
+                      { v: "Wire", l: "Wire" },
+                      { v: "Zelle", l: "Zelle" },
+                      { v: "Cash", l: "Cash" },
+                      { v: "CC", l: "Credit Card" },
+                    ],
+                  }),
+                  l.jsx(D, {
+                    label: "Confirmation #",
+                    value: co.conf,
+                    onChange: (N) => fo((X) => ({ ...X, conf: N })),
+                    ph: "Check #, wire ref, etc.",
+                  }),
+                  l.jsx(D, {
+                    label: "Notes",
+                    value: co.notes,
+                    onChange: (N) => fo((X) => ({ ...X, notes: N })),
+                    ph: "Optional payment notes",
+                  }),
+                  l.jsxs("div", {
+                    style: {
+                      display: "flex",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    },
+                    children: [
+                      l.jsx(H, {
+                        onClick: () => Qo("paid"),
+                        v: "success",
+                        icon: ts,
+                        children:
+                          K.status === "paid" ? "Save Payment" : "Mark Paid",
+                      }),
+                      K.status === "paid" &&
+                        l.jsx(H, {
+                          onClick: () => Qo("pending"),
+                          v: "secondary",
+                          children: "Mark as Pending",
+                        }),
+                    ],
+                  }),
+                ],
+              }),
+            });
+          })(),
         m &&
           l.jsx(Fe, {
             title: `הוסף ${ge ? "קבלן" : "ספק"}`,
@@ -9750,86 +13013,311 @@ Thank you`);
       ],
     });
   },
-  ag = ({ projs: e, pays: t, cp: n }) => {
-    var a;
-    const r = n ? e.filter((c) => c.id === n) : e,
-      i = t.filter((c) => r.some((f) => f.id === c.pid)),
-      o = {};
-    i.forEach((c) => {
-      o[c.cat] = (o[c.cat] || 0) + c.amt;
+  RpCoAmt = (I) =>
+    typeof I.amt === "number" ? I.amt : parseFloat(I.amt) || 0,
+  RpPayAmt = (I) => Number(I.amt) || 0,
+  RpStageOrder = [
+    "Demo",
+    "Fence",
+    "Garage Loft",
+    "Insulation",
+    "Paint",
+    "Electrical",
+    "HVAC",
+    "Gutters",
+    "Cabinets",
+    "Epoxy",
+  ],
+  RpFmt = (I) => "$" + Math.round(I || 0).toLocaleString(),
+  RpPct = (I) => (Number.isFinite(I) ? I.toFixed(1) : "0.0") + "%",
+  RpScopeIds = (I, b, fe) => {
+    const G = new Set();
+    for (const ft of I || [])
+      for (const $ of ft.scopes || [])
+        $.pid === b && $.phId === fe && G.add($.id);
+    return G;
+  },
+  RpOrderedPhases = (I, b) => {
+    const fe = (I || [])
+      .filter((G) => G.pid === b)
+      .sort((G, ft) => (G.ord || 0) - (ft.ord || 0));
+    if (b !== "zfjnvrxmo8rj9ui") return fe;
+    const G = [],
+      ft = new Set();
+    for (const $ of RpStageOrder) {
+      const Q = fe.find(
+        (hn) => hn.name === $ || hn.he === $,
+      );
+      Q && (G.push(Q), ft.add(Q.id));
+    }
+    return (fe.forEach(($) => {
+      ft.has($.id) || G.push($);
+    }),
+      G);
+  },
+  RpPhaseActual = (I, b, fe, G) =>
+    (I || [])
+      .filter(
+        (ft) =>
+          ft.pid === b &&
+          (ft.phId === fe || (ft.scopeId && G.has(ft.scopeId))),
+      )
+      .reduce((ft, $) => ft + RpPayAmt($), 0),
+  RpSummary = (I, b, fe, G) => {
+    if (!I) return null;
+    const ft = (b || []).filter(($) => $.pid === G),
+      $ = ft.reduce((Q, hn) => Q + RpPayAmt(hn), 0),
+      Q = I.projectCategory === "construction",
+      hn = Q
+        ? (I.changeOrders || [])
+            .filter((Rt) => Rt.status === "approved")
+            .reduce((Rt, Ve) => Rt + RpCoAmt(Ve), 0)
+        : 0,
+      de = Q
+        ? (Number(I.originalContract) || 0) + hn
+        : Number(I.totalBudget) || 0,
+      mn = de - $,
+      Rt = de > 0 ? (mn / de) * 100 : 0,
+      Ve = (fe || []).filter((fr) => fr.pid === G),
+      xr = Ve.length
+        ? Math.round(
+            Ve.reduce((fr, hr) => fr + (hr.progress || 0), 0) / Ve.length,
+          )
+        : 0;
+    return {
+      revenue: de,
+      expenses: $,
+      profit: mn,
+      margin: Rt,
+      progress: xr,
+      remaining: mn,
+      changeOrders: I.changeOrders || [],
+      approvedCO: hn,
+      isConstruction: Q,
+    };
+  },
+  RpStageRows = (I, b, fe, G, ft) => {
+    const $ = RpOrderedPhases(I, ft);
+    return $.map((Q) => {
+      const hn = RpScopeIds(fe, ft, Q.id),
+        de = RpPhaseActual(G, ft, Q.id, hn);
+      return {
+        id: Q.id,
+        name: Q.he || Q.name,
+        actual: de,
+      };
     });
-    const s = Object.entries(o).sort((c, f) => f[1] - c[1]),
-      d = ((a = s[0]) == null ? void 0 : a[1]) || 1;
+  },
+  ag = ({ projs: e, pays: t, phases: n, contacts: r, cp: i }) => {
+    const o = ul(),
+      s = i ? e.find((c) => c.id === i) : e[0],
+      d = i || (s == null ? void 0 : s.id),
+      a = T.useMemo(
+        () => (d ? RpSummary(s, t, n, d) : null),
+        [s, t, n, d],
+      ),
+      f = T.useMemo(
+        () =>
+          d
+            ? RpStageRows(n, s, r, t, d)
+                .filter((m) => m.actual > 0)
+                .sort((m, _) => _.actual - m.actual)
+            : [],
+        [n, s, r, t, d],
+      );
     return l.jsxs("div", {
       children: [
-        l.jsx("h2", {
-          style: { fontSize: 20, fontWeight: 700, marginBottom: 12 },
-          children: se.reports,
-        }),
-        l.jsxs(je, {
+        l.jsxs("div", {
+          style: {
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+            gap: 8,
+            marginBottom: 12,
+          },
           children: [
-            l.jsx("h3", {
-              style: { fontSize: 13, fontWeight: 600, marginBottom: 10 },
-              children: "הוצאות לפי קטגוריה",
-            }),
-            s.map(([c, f]) =>
-              l.jsxs(
-                "div",
-                {
-                  style: {
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    marginBottom: 6,
-                  },
+            l.jsxs("div", {
+              children: [
+                l.jsx("h2", {
+                  style: { fontSize: 20, fontWeight: 700, marginBottom: 4 },
+                  children: se.reports,
+                }),
+                l.jsxs("div", {
+                  style: { fontSize: 12, color: u.text2 },
                   children: [
-                    l.jsx("span", {
-                      style: {
-                        width: 70,
-                        fontSize: 10,
-                        color: u.text2,
-                        textAlign: "right",
-                      },
-                      children: c,
-                    }),
-                    l.jsx("div", {
-                      style: {
-                        flex: 1,
-                        height: 14,
-                        background: u.card2,
-                        borderRadius: 4,
-                        overflow: "hidden",
-                      },
-                      children: l.jsx("div", {
-                        style: {
-                          width: `${(f / d) * 100}%`,
-                          height: "100%",
-                          background: u.accent,
-                          borderRadius: 4,
-                        },
-                      }),
-                    }),
-                    l.jsxs("span", {
-                      style: {
-                        fontSize: 10,
-                        fontFamily: "'JetBrains Mono'",
-                        minWidth: 55,
-                      },
-                      children: ["$", f.toLocaleString()],
-                    }),
+                    (s == null ? void 0 : s.name) || se.allProjects,
+                    " — read-only project analytics",
                   ],
-                },
-                c,
-              ),
-            ),
+                }),
+              ],
+            }),
+            l.jsx(ot, { color: u.blue, children: "Read-only · No data changes" }),
           ],
         }),
+        !s &&
+          l.jsx(je, {
+            children: l.jsx("div", {
+              style: { fontSize: 13, color: u.text3, textAlign: "center" },
+              children: "Select a project to view reports.",
+            }),
+          }),
+        s &&
+          a &&
+          l.jsxs(l.Fragment, {
+            children: [
+              l.jsxs(je, {
+                s: { marginBottom: 12 },
+                children: [
+                  l.jsx("h3", {
+                    style: { fontSize: 14, fontWeight: 700, marginBottom: 10 },
+                    children: "Project Summary",
+                  }),
+                  l.jsxs("div", {
+                    style: {
+                      display: "grid",
+                      gridTemplateColumns: o
+                        ? "1fr 1fr"
+                        : "repeat(auto-fit,minmax(140px,1fr))",
+                      gap: 8,
+                    },
+                    children: [
+                      l.jsx(nr, {
+                        icon: di,
+                        label: "Revenue",
+                        value: RpFmt(a.revenue),
+                        color: u.green,
+                      }),
+                      l.jsx(nr, {
+                        icon: Pm,
+                        label: "Expenses",
+                        value: RpFmt(a.expenses),
+                        color: u.red,
+                      }),
+                      l.jsx(nr, {
+                        icon: Wh,
+                        label: "Net Profit",
+                        value: RpFmt(a.profit),
+                        color: a.profit >= 0 ? u.blue : u.red,
+                      }),
+                      l.jsx(nr, {
+                        icon: Oc,
+                        label: "Profit Margin",
+                        value: RpPct(a.margin),
+                        color: u.accent,
+                      }),
+                      l.jsx(nr, {
+                        icon: bc,
+                        label: "Progress",
+                        value: `${a.progress}%`,
+                        color: u.blue,
+                      }),
+                      l.jsx(nr, {
+                        icon: di,
+                        label: "Remaining Balance",
+                        value: RpFmt(a.remaining),
+                        color: a.remaining >= 0 ? u.green : u.red,
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+              l.jsxs(je, {
+                s: { marginBottom: 12 },
+                children: [
+                  l.jsx("h3", {
+                    style: { fontSize: 14, fontWeight: 700, marginBottom: 4 },
+                    children: "Most Expensive Stages",
+                  }),
+                  l.jsx("p", {
+                    style: {
+                      fontSize: 11,
+                      color: u.text3,
+                      margin: "0 0 10px",
+                    },
+                    children: "Ranked by total spend — where the money went.",
+                  }),
+                  f.length === 0
+                    ? l.jsx("div", {
+                        style: { fontSize: 12, color: u.text3 },
+                        children: "No stage expenses recorded yet.",
+                      })
+                    : l.jsx("div", {
+                        style: {
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 0,
+                        },
+                        children: f.map((m, _) =>
+                          l.jsxs(
+                            "div",
+                            {
+                              style: {
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                padding: "8px 0",
+                                borderBottom:
+                                  _ < f.length - 1
+                                    ? `1px solid ${u.border}`
+                                    : "none",
+                              },
+                              children: [
+                                l.jsxs("span", {
+                                  style: { fontSize: 13, fontWeight: 500 },
+                                  children: [
+                                    l.jsx("span", {
+                                      style: {
+                                        color: u.text3,
+                                        fontFamily: "'JetBrains Mono'",
+                                        fontSize: 11,
+                                        marginLeft: 6,
+                                      },
+                                      children: _ + 1 + ".",
+                                    }),
+                                    " ",
+                                    m.name,
+                                  ],
+                                }),
+                                l.jsx("span", {
+                                  style: {
+                                    fontSize: 13,
+                                    fontWeight: 700,
+                                    fontFamily: "'JetBrains Mono'",
+                                  },
+                                  children: RpFmt(m.actual),
+                                }),
+                              ],
+                            },
+                            m.id,
+                          ),
+                        ),
+                      }),
+                ],
+              }),
+            ],
+          }),
       ],
     });
   },
   ug = ({ showToast: e, projs: En, cp: Ve, setProjs: fr }) => {
-    const i = (En || []).find((o) => o.id === Ve);
-    const t = () => {
+    const i = (En || []).find((o) => o.id === Ve),
+      [mn, Rt] = T.useState(null),
+      [Vn, Fn] = T.useState(() => {
+        try {
+          const r = localStorage.getItem(al);
+          if (!r) return null;
+          const p = JSON.parse(r);
+          return {
+            savedAt: p._autobackupAt || p.savedAt,
+            expenses: ef(p.pays, Ve),
+          };
+        } catch {
+          return null;
+        }
+      }),
+      pn = i ? i.name : Ve ? "Project" : "All projects",
+      t = () => {
         const r = localStorage.getItem(rl);
         if (!r) return e("אין נתונים לייצוא");
         const i = new Blob([r], { type: "application/json" }),
@@ -9848,7 +13336,7 @@ Thank you`);
         ((o.onload = (s) => {
           try {
             (JSON.parse(s.target.result),
-              localStorage.setItem(rl, s.target.result),
+              Gu("settings-import", s.target.result),
               e("נתונים יובאו בהצלחה! מרענן..."),
               setTimeout(() => window.location.reload(), 1500));
           } catch {
@@ -9856,7 +13344,91 @@ Thank you`);
           }
         }),
           o.readAsText(i));
-      };
+      },
+      hn = () => {
+        let g = null;
+        try {
+          const I = localStorage.getItem(rl);
+          g = I ? JSON.parse(I) : null;
+        } catch {}
+        (Rt({ local: g, cloud: null, loading: !0 }),
+          yu()
+            .then((I) => {
+              I
+                ? Rt({ local: g, cloud: I, loading: !1 })
+                : (Rt(null), e("Could not fetch cloud data ❌"));
+            })
+            .catch(() => (Rt(null), e("Could not fetch cloud data ❌"))));
+      },
+      rn = () => {
+        const { cloud: g, local: I } = mn || {};
+        if (!g) return;
+        try {
+          const b = localStorage.getItem(rl);
+          if (b) {
+            const fe = { ...JSON.parse(b), _autobackupAt: Date.now(), _autobackupSource: "pre-cloud-restore" },
+              G = JSON.stringify(fe);
+            (localStorage.setItem(al, G),
+              console.log("[CC LS] pre-restore autobackup saved", {
+                key: al,
+                source: "pre-restore-autobackup",
+                jordanPaysSum: Yu(fe.pays).sum,
+                projectExpenses: ef(fe.pays, Ve),
+                savedAt: fe._autobackupAt,
+              }),
+              Fn({ savedAt: fe._autobackupAt, expenses: ef(fe.pays, Ve) }));
+          }
+        } catch (b) {
+          console.error("[CC LS] pre-restore autobackup failed", b);
+        }
+        (Gu("settings-restore-from-cloud", g),
+          e("Restoring from cloud... reloading"),
+          setTimeout(() => window.location.reload(), 800));
+      },
+      an = () => {
+        const g = localStorage.getItem(al);
+        if (!g) return e("No auto-backup found");
+        try {
+          const I = JSON.parse(g);
+          (Gu("settings-restore-autobackup", I),
+            e("Restoring auto-backup... reloading"),
+            setTimeout(() => window.location.reload(), 800));
+        } catch {
+          e("Auto-backup is corrupt ❌");
+        }
+      },
+      ln = (g, I) =>
+        l.jsxs("div", {
+          style: {
+            flex: 1,
+            minWidth: 180,
+            padding: 12,
+            borderRadius: 8,
+            background: u.card2,
+            border: `1px solid ${u.border}`,
+          },
+          children: [
+            l.jsx("div", {
+              style: { fontSize: 13, fontWeight: 600, marginBottom: 8 },
+              children: g,
+            }),
+            l.jsxs("div", {
+              style: { fontSize: 12, color: u.text2, marginBottom: 6 },
+              children: ["Saved: ", Ju(I == null ? void 0 : I.savedAt)],
+            }),
+            l.jsxs("div", {
+              style: {
+                fontSize: 15,
+                fontWeight: 700,
+                fontFamily: "'JetBrains Mono'",
+              },
+              children: [
+                "Expenses: $",
+                ef(I == null ? void 0 : I.pays, Ve).toLocaleString(),
+              ],
+            }),
+          ],
+        });
     return l.jsxs("div", {
       children: [
         l.jsx("h2", {
@@ -9944,21 +13516,32 @@ Thank you`);
           children: [
             l.jsx("h3", {
               style: { fontSize: 14, fontWeight: 600, marginBottom: 10 },
-              children: "💾 גיבוי ושחזור נתונים",
+              children: "🔧 Developer / Recovery",
             }),
             l.jsx("p", {
               style: { fontSize: 12, color: u.text2, marginBottom: 12 },
               children:
-                "ייצא את כל הנתונים שלך לקובץ גיבוי, או ייבא נתונים מגיבוי קודם.",
+                "Advanced data tools. Restore from cloud replaces all local data with the Supabase copy.",
             }),
             l.jsxs("div", {
-              style: { display: "flex", gap: 8, flexWrap: "wrap" },
+              style: {
+                display: "flex",
+                gap: 8,
+                flexWrap: "wrap",
+                alignItems: "center",
+              },
               children: [
+                l.jsx(H, {
+                  icon: ym,
+                  v: "danger",
+                  onClick: hn,
+                  children: "Restore from Cloud",
+                }),
                 l.jsx(H, {
                   icon: $c,
                   v: "primary",
                   onClick: t,
-                  children: "ייצא נתונים (גיבוי)",
+                  children: "Export Backup",
                 }),
                 l.jsxs("label", {
                   style: {
@@ -9976,7 +13559,7 @@ Thank you`);
                   },
                   children: [
                     l.jsx(vn, { size: 12 }),
-                    "ייבא נתונים (שחזור)",
+                    "Import Backup",
                     l.jsx("input", {
                       type: "file",
                       accept: ".json",
@@ -9987,8 +13570,131 @@ Thank you`);
                 }),
               ],
             }),
+            Vn &&
+              l.jsxs("div", {
+                style: {
+                  marginTop: 10,
+                  padding: 10,
+                  borderRadius: 8,
+                  background: u.accentS,
+                  fontSize: 12,
+                  color: u.text2,
+                },
+                children: [
+                  l.jsxs("span", {
+                    children: [
+                      "Last auto-backup: ",
+                      Ju(Vn.savedAt),
+                      " — Expenses: $",
+                      Vn.expenses.toLocaleString(),
+                    ],
+                  }),
+                  l.jsx(H, {
+                    v: "secondary",
+                    sz: "sm",
+                    onClick: an,
+                    s: { marginTop: 8 },
+                    children: "Restore Auto-Backup",
+                  }),
+                ],
+              }),
           ],
         }),
+        mn &&
+          l.jsx(Fe, {
+            title: "Restore from Cloud",
+            onClose: () => Rt(null),
+            w: 540,
+            children: mn.loading
+              ? l.jsx("div", {
+                  style: {
+                    fontSize: 13,
+                    color: u.text2,
+                    textAlign: "center",
+                    padding: 20,
+                  },
+                  children: "Fetching cloud data…",
+                })
+              : l.jsxs("div", {
+                  children: [
+                    l.jsx("p", {
+                      style: { fontSize: 12, color: u.text2, marginBottom: 12 },
+                      children: [
+                        "Compare local vs cloud for ",
+                        pn,
+                        ". Restoring will replace all local data with the cloud copy.",
+                      ],
+                    }),
+                    l.jsxs("div", {
+                      style: {
+                        display: "flex",
+                        gap: 10,
+                        marginBottom: 14,
+                        flexWrap: "wrap",
+                      },
+                      children: [
+                        ln("Local", mn.local),
+                        ln("Cloud", mn.cloud),
+                      ],
+                    }),
+                    ((mn.local == null ? void 0 : mn.local.savedAt) || 0) >
+                      ((mn.cloud == null ? void 0 : mn.cloud.savedAt) || 0) ||
+                    ef(mn.local == null ? void 0 : mn.local.pays, Ve) >
+                      ef(mn.cloud == null ? void 0 : mn.cloud.pays, Ve)
+                      ? l.jsxs("div", {
+                          style: {
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "flex-start",
+                            padding: 10,
+                            borderRadius: 8,
+                            background: u.yellow + "18",
+                            border: `1px solid ${u.yellow}40`,
+                            marginBottom: 12,
+                            fontSize: 12,
+                            color: u.text,
+                          },
+                          children: [
+                            l.jsx(Dm, {
+                              size: 16,
+                              color: u.yellow,
+                              style: { flexShrink: 0, marginTop: 1 },
+                            }),
+                            l.jsx("span", {
+                              children:
+                                "Local data appears newer or larger than cloud. Restoring will overwrite your current local data with the older cloud version.",
+                            }),
+                          ],
+                        })
+                      : null,
+                    l.jsx("p", {
+                      style: { fontSize: 11, color: u.text3, marginBottom: 14 },
+                      children:
+                        "A local auto-backup of your current data will be saved before restoring. You can restore it from Developer / Recovery.",
+                    }),
+                    l.jsxs("div", {
+                      style: {
+                        display: "flex",
+                        gap: 8,
+                        justifyContent: "flex-end",
+                      },
+                      children: [
+                        l.jsx(H, {
+                          v: "secondary",
+                          onClick: () => Rt(null),
+                          children: "Cancel",
+                        }),
+                        l.jsx(H, {
+                          v: "danger",
+                          icon: ym,
+                          onClick: rn,
+                          children: "Restore from Cloud",
+                        }),
+                      ],
+                    }),
+                  ],
+                }),
+          }),
         l.jsxs(je, {
           s: { marginTop: 12 },
           children: [
@@ -10598,15 +14304,128 @@ Thank you`);
     });
   },
   rl = "cc_data_v1",
+  wd = "zfjnvrxmo8rj9ui",
+  Yu = (g) => {
+    const I = (g || []).filter((b) => b.pid === wd);
+    return {
+      count: I.length,
+      sum: Math.round(I.reduce((b, fe) => b + (Number(fe.amt) || 0), 0)),
+    };
+  },
+  Gu = (I, b, fe) => {
+    const G =
+        typeof b === "string"
+          ? (() => {
+              try {
+                return JSON.parse(b);
+              } catch {
+                return null;
+              }
+            })()
+          : b,
+      ft = Yu(G == null ? void 0 : G.pays),
+      $ = typeof b === "string" ? b : JSON.stringify(b),
+      Qe = $.length;
+    let oe = !0,
+      q = null;
+    try {
+      localStorage.setItem(rl, $);
+    } catch (Ve) {
+      ((oe = !1), (q = Ve));
+    }
+    const ne = {
+      ts: Date.now(),
+      tsISO: new Date().toISOString(),
+      source: I,
+      ok: oe,
+      error: q ? q.name + ": " + (q.message || String(q)) : void 0,
+      jordanPaysLen: ft.count,
+      jordanPaysSum: ft.sum,
+      paysLen: ((G == null ? void 0 : G.pays) || []).length,
+      bytes: Qe,
+      savedAt: G == null ? void 0 : G.savedAt,
+      ...fe,
+    };
+    if (oe) {
+      try {
+        const Ve = JSON.parse(localStorage.getItem(rl) || "{}"),
+          Ee = Yu(Ve.pays);
+        ((ne.readBackJordanPaysSum = Ee.sum),
+          (ne.readBackJordanPaysLen = Ee.count),
+          (ne.verifyOk =
+            Ee.sum === ft.sum && Ee.count === ft.count));
+        ne.verifyOk ||
+          console.error("[CC LS] read-back mismatch after setItem", ne);
+      } catch (Ve) {
+        ((ne.verifyOk = !1),
+          (ne.readBackError = Ve.message || String(Ve)));
+      }
+      console.log("[CC LS] setItem ok", ne);
+    } else console.error("[CC LS] setItem FAILED", ne);
+    try {
+      const Ve = JSON.parse(sessionStorage.getItem("cc_ls_write_log") || "[]");
+      (Ve.push(ne),
+        Ve.length > 100 && Ve.shift(),
+        sessionStorage.setItem("cc_ls_write_log", JSON.stringify(Ve)));
+    } catch {}
+    return ne;
+  },
+  Zu = (g) => {
+    try {
+      const I = JSON.parse(sessionStorage.getItem("cc_cloud_upload_log") || "[]");
+      (I.push(g),
+        I.length > 100 && I.shift(),
+        sessionStorage.setItem("cc_cloud_upload_log", JSON.stringify(I)));
+    } catch {}
+  },
+  al = "cc_data_v1_autobackup",
+  Ju = (g) => {
+    if (!g) return "—";
+    const I = new Date(g);
+    return Number.isNaN(I.getTime())
+      ? "—"
+      : I.toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: !0,
+        });
+  },
+  ef = (g, I) => {
+    const b = I ? (g || []).filter((fe) => fe.pid === I) : g || [];
+    return Math.round(b.reduce((fe, G) => fe + (Number(G.amt) || 0), 0));
+  },
   Ac = () => {
     try {
       const e = localStorage.getItem(rl);
-      if (!e) return null;
-      const p = JSON.parse(e);
-      if (p && p.projs && !p.projs.some(x => x.id === "zfjnvrxmo8rj9ui")) { localStorage.removeItem(rl); return null; }
+      if (!e)
+        return (
+          console.log("[CC LS] read startup: key missing or empty"),
+          null
+        );
+      const p = JSON.parse(e),
+        b = Yu(p.pays);
+      if (
+        (console.log("[CC LS] read startup", {
+          jordanPaysLen: b.count,
+          jordanPaysSum: b.sum,
+          paysLen: (p.pays || []).length,
+          bytes: e.length,
+          savedAt: p.savedAt,
+        }),
+        p && p.projs && !p.projs.some((x) => x.id === wd))
+      )
+        return (
+          console.warn("[CC LS] removeItem: Jordan missing from projs", {
+            projsLen: (p.projs || []).length,
+          }),
+          localStorage.removeItem(rl),
+          null
+        );
       return p;
-    } catch {
-      return null;
+    } catch (e) {
+      return (console.error("[CC LS] read startup parse failed", e), null);
     }
   },
   Uc = "https://bdckzzweimrmvcvvahbr.supabase.co",
@@ -10624,7 +14443,19 @@ Thank you`);
       return null;
     }
   },
-  re = Ac();
+  Bu = (g, I) => {
+    const b = (g || []).length,
+      fe = (g || []).reduce(($, Q) => $ + (Number(Q.amt) || 0), 0);
+    return { count: b, sum: Math.round(fe) };
+  },
+  re = Ac(),
+  _ccBoot = (() => {
+    const g = Ar((re == null ? void 0 : re.contacts) || Km);
+    return {
+      contacts: g,
+      pays: If(Ru((re == null ? void 0 : re.pays) || Qm, g), g),
+    };
+  })();
 
 function cg() {
   var v;
@@ -10640,13 +14471,8 @@ function cg() {
     ),
     [y, C] = T.useState((re == null ? void 0 : re.phases) || Hm),
     [h, p] = T.useState((re == null ? void 0 : re.tasks) || Vm),
-    [j, E] = T.useState(() => {
-      const g = Ar((re == null ? void 0 : re.contacts) || Km);
-      return Ru((re == null ? void 0 : re.pays) || Qm, g);
-    }),
-    [M, W] = T.useState(
-      Ar((re == null ? void 0 : re.contacts) || Km),
-    ),
+    [j, E] = T.useState(_ccBoot.pays),
+    [M, W] = T.useState(_ccBoot.contacts),
     [F, B] = T.useState((re == null ? void 0 : re.msgs) || qm),
     [V, A] = T.useState((re == null ? void 0 : re.notifs) || Jm),
     [ue] = T.useState([]),
@@ -10656,28 +14482,80 @@ function cg() {
     [$, Q] = T.useState("idle"),
     q = T.useRef(null),
     oe = T.useCallback((g) => {
-      const I = JSON.stringify(g);
-      try {
-        localStorage.setItem(rl, I);
-      } catch {}
-      (Q("saving"),
+      const I = { ...g, savedAt: Date.now() },
+        b = JSON.stringify(I),
+        fe = Bu(I.pays),
+        G = Yu(I.pays),
+        ft = Gu("oe() auto-save", I);
+      (console.log("[CC Sync] local save", {
+        paysLen: fe.count,
+        paysSum: fe.sum,
+        jordanPaysLen: G.count,
+        jordanPaysSum: G.sum,
+        setItemOk: ft.ok,
+        verifyOk: ft.verifyOk,
+        bytes: b.length,
+        savedAt: I.savedAt,
+      }),
+        Q("saving"),
         clearTimeout(q.current),
         (q.current = setTimeout(() => {
-          fetch(`${Uc}/storage/v1/object/${Hc}/${Vc}`, {
-            method: "PUT",
-            headers: {
-              Authorization: `Bearer ${hi}`,
-              apikey: hi,
-              "Content-Type": "application/json",
-              "x-upsert": "true",
-            },
-            body: I,
-          })
-            .then(() => {
-              (Q("saved"),
-                setTimeout(() => Q((b) => (b === "saved" ? "idle" : b)), 3e3));
+          const $e = Date.now(),
+            Qe = {
+              ts: $e,
+              tsISO: new Date($e).toISOString(),
+              uploadId: $e,
+              jordanPaysLen: G.count,
+              jordanPaysSum: G.sum,
+              paysLen: fe.count,
+              paysSum: fe.sum,
+              bytes: b.length,
+              savedAt: I.savedAt,
+              setItemOk: ft.ok,
+            };
+          (console.log("[CC Cloud] upload start", Qe),
+            Zu({ phase: "start", ...Qe }),
+            fetch(`${Uc}/storage/v1/object/${Hc}/${Vc}`, {
+              method: "PUT",
+              headers: {
+                Authorization: `Bearer ${hi}`,
+                apikey: hi,
+                "Content-Type": "application/json",
+                "x-upsert": "true",
+              },
+              body: b,
             })
-            .catch(() => Q("error"));
+              .then(async (ne) => {
+                const Ee = {
+                  ...Qe,
+                  phase: ne.ok ? "success" : "failed",
+                  httpStatus: ne.status,
+                  ok: ne.ok,
+                };
+                ne.ok ||
+                  (Ee.responseBody = await ne.text().catch(() => ""));
+                (ne.ok
+                  ? console.log("[CC Cloud] upload success", Ee)
+                  : console.error("[CC Cloud] upload failed", Ee),
+                  Zu(Ee),
+                  Q(ne.ok ? "saved" : "error"),
+                  setTimeout(
+                    () => Q((Ie) => (Ie === "saved" ? "idle" : Ie)),
+                    3e3,
+                  ));
+              })
+              .catch((ne) => {
+                const Ee = {
+                  ...Qe,
+                  phase: "error",
+                  ok: !1,
+                  httpStatus: null,
+                  error: ne.message || String(ne),
+                };
+                (console.error("[CC Cloud] upload failed", Ee),
+                  Zu(Ee),
+                  Q("error"));
+              }));
         }, 2e3)));
     }, []),
     [ne, Ee] = T.useState(null),
@@ -10745,26 +14623,75 @@ function cg() {
     }, [_, y, h, j, M, F, V, P, w, ee, d, oe]));
   const Ve = T.useCallback((g) => m(g), []);
   T.useEffect(() => {
+    try {
+      const g = JSON.parse(sessionStorage.getItem("cc_ls_write_log") || "[]");
+      g.length &&
+        console.log(
+          "[CC LS] write history (persists across reload in this tab)",
+          g,
+        );
+      const I = JSON.parse(sessionStorage.getItem("cc_cloud_upload_log") || "[]");
+      I.length &&
+        console.log(
+          "[CC Cloud] upload history (persists across reload in this tab)",
+          I,
+        );
+    } catch {}
+  }, []);
+  T.useEffect(() => {
     yu().then((g) => {
-      if (!g) return;
+      if (!g) {
+        const I = Ac(),
+          b = Bu(I == null ? void 0 : I.pays);
+        return void console.log("[CC Sync] startup: cloud unavailable, keeping local", {
+          localPaysLen: b.count,
+          localPaysSum: b.sum,
+          winner: "local",
+        });
+      }
       const I = Ac(),
         b = JSON.stringify(g).length,
-        fe = I ? JSON.stringify(I).length : 0;
-      b > fe + 50 &&
-        (k(Xu(Wu(g.projs || []))),
-        C(g.phases || []),
-        p(g.tasks || []),
-        (() => {
-          const I = Ar(g.contacts || []);
-          (W(I), E(Ru(g.pays || [], I)));
-        })(),
-        B(g.msgs || []),
-        A(g.notifs || []),
-        z(g.docs || []),
-        L(g.folders || []),
-        te(g.orders || []),
-        g.cp && a(g.cp),
-        Ve("☁️ נתונים סונכרנו מהענן"));
+        fe = I ? JSON.stringify(I).length : 0,
+        G = Bu(I == null ? void 0 : I.pays),
+        ft = Bu(g.pays),
+        $ = (I == null ? void 0 : I.savedAt) || 0,
+        Qe = g.savedAt || 0;
+      let oe = !1,
+        ne = "local (default)";
+      Qe > $
+        ? ((oe = !0), (ne = "cloud (newer savedAt)"))
+        : $ > Qe
+          ? (ne = "local (newer savedAt)")
+          : b > fe + 50
+            ? ((oe = !0), (ne = "cloud (legacy size heuristic)"))
+            : (ne = "local (size tie or smaller cloud)");
+      (console.log("[CC Sync] startup compare", {
+        localPaysLen: G.count,
+        cloudPaysLen: ft.count,
+        localPaysSum: G.sum,
+        cloudPaysSum: ft.sum,
+        localJsonBytes: fe,
+        cloudJsonBytes: b,
+        localSavedAt: $,
+        cloudSavedAt: Qe,
+        winner: ne,
+        applyCloud: oe,
+      }),
+        oe &&
+          (k(Xu(Wu(g.projs || []))),
+          C(g.phases || []),
+          p(g.tasks || []),
+          (() => {
+            const Ee = Ar(g.contacts || []);
+            (W(Ee), E(Ru(g.pays || [], Ee)));
+          })(),
+          B(g.msgs || []),
+          A(g.notifs || []),
+          z(g.docs || []),
+          L(g.folders || []),
+          te(g.orders || []),
+          g.cp && a(g.cp),
+          Ve("☁️ נתונים סונכרנו מהענן")));
     });
   }, []);
   const fr = () => {
@@ -10860,15 +14787,20 @@ function cg() {
             pays: j,
             cp: d,
             setPage: s,
+            setProjs: k,
+            showToast: Ve,
           });
         case "phases":
           return l.jsx(eg, {
             phases: y,
             setPhases: C,
             cp: d,
+            projs: _,
             contacts: M,
             setContacts: W,
             showToast: Ve,
+            pays: j,
+            setPays: E,
           });
         case "tasks":
           return l.jsx(tg, { tasks: h, setTasks: p, phases: y, cp: d });
@@ -10890,6 +14822,7 @@ function cg() {
             setContacts: W,
             type: "contractors",
             cp: d,
+            projs: _,
             phases: y,
             showToast: Ve,
             pays: j,
@@ -10901,6 +14834,7 @@ function cg() {
             setContacts: W,
             type: "suppliers",
             cp: d,
+            projs: _,
             phases: y,
             showToast: Ve,
             pays: j,
@@ -10936,7 +14870,13 @@ function cg() {
         case "notifications":
           return l.jsx(og, { notifs: V, setNotifs: A });
         case "reports":
-          return l.jsx(ag, { projs: _, pays: j, cp: d });
+          return l.jsx(ag, {
+            projs: _,
+            pays: j,
+            phases: y,
+            contacts: M,
+            cp: d,
+          });
         case "settings":
           return l.jsx(ug, {
             showToast: Ve,
@@ -11058,26 +14998,6 @@ function cg() {
                                 : "",
                       }),
                     ],
-                  }),
-                  l.jsx("button", {
-                    onClick: () => {
-                      (Q("saving"),
-                        yu().then((g) => {
-                          g
-                            ? (localStorage.setItem(rl, JSON.stringify(g)),
-                              window.location.reload())
-                            : Q("error");
-                        }));
-                    },
-                    style: {
-                      background: "none",
-                      border: "none",
-                      cursor: "pointer",
-                      color: u.text3,
-                      padding: 4,
-                    },
-                    title: "רענון מהענן",
-                    children: l.jsx(ym, { size: 14 }),
                   }),
                   l.jsxs("button", {
                     onClick: () => s("notifications"),
