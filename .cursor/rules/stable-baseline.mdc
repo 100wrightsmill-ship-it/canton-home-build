@@ -1,0 +1,34 @@
+---
+description: Stable baseline and data safety — commit before refactors, never delete user data without approval
+alwaysApply: true
+---
+
+# Stable baseline & data safety
+
+Official stable release on GitHub: tag **`v1.0.1-stable-baseline`** (branch `stable/v1.0.1-baseline`).
+
+Local-only earlier tag `v1.0-stable-baseline` remains unchanged — do not delete or move it.
+
+Restore from GitHub:
+```bash
+git fetch origin tag v1.0.1-stable-baseline
+git checkout v1.0.1-stable-baseline
+```
+
+## Data safety (required)
+
+- **Never delete or overwrite existing project/user data** (localStorage `cc_data_v1`, Supabase cloud state, seed migrations, repair passes) **without explicit user approval**.
+- User data lives in the browser (`cc_data_v1`) and cloud sync — **code commits do not include user data**. Do not add `.env`, credentials, or localStorage dumps to git.
+
+## Before risky changes
+
+1. **Major refactor**, sync logic change, or storage/schema change → **create a git commit first** (user may ask to push).
+2. **Change that affects stored data** (migrations, `Ru()`/`If()` repair, bulk deletes, cloud restore) → **ensure automatic backup exists** before applying:
+   - App already auto-backs to `cc_data_v1_autobackup` and cloud — do not disable without approval.
+   - Prefer additive/repair logic over destructive cleanup unless user confirms.
+3. If something breaks → user restores **`v1.0.1-stable-baseline`** (or latest commit on `stable/v1.0.1-baseline`).
+
+## Scope
+
+- App code: primarily `src/App.jsx`
+- Do not commit unless the user explicitly asks.
