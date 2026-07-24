@@ -66,12 +66,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         G.scopeId === b.id ||
         (G.linkedStage && fe.includes(G.linkedStage)) ||
         (G.milestone && fe.includes(G.milestone)) ||
+        (G.milestone &&
+          fe.some((st) => PmStg(G, st))) ||
         (!G.linkedStage &&
           !G.milestone &&
           !G.scopeId &&
           !(b.stages || []).length),
     );
   },
+  PmStg = (p, n) =>
+    p.linkedStage === n ||
+    p.milestone === n ||
+    (p.milestone &&
+      (p.milestone.endsWith("→ " + n) || p.milestone.endsWith(" → " + n))),
   Lr = (I, b) =>
     Mt(I, b)
       .filter((G) => G.status === "paid")
@@ -224,6 +231,23 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     return Number.isFinite(b) && b !== 0 ? b : null;
   },
   Fu = (I) => Lu(I) != null && Lu(I) < 0,
+  FmtNum = (I) => {
+    if (I == null || I === "") return 0;
+    const b =
+      typeof I === "number" ? I : parseFloat(String(I).replace(/,/g, ""));
+    return Number.isFinite(b) ? b : 0;
+  },
+  FmtAmt = (I) => Math.round(FmtNum(I)).toLocaleString("en-US"),
+  FmtAmtAbs = (I) =>
+    Math.abs(Math.round(FmtNum(I))).toLocaleString("en-US"),
+  FmtUsd = (I) => "$" + FmtAmt(I),
+  FmtUsdAbs = (I) => "$" + FmtAmtAbs(I),
+  FmtUsdDec = (I) =>
+    "$" +
+    FmtNum(I).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }),
   em = (I) => ({
     paidDate:
       wu(I.paidDate) ||
@@ -319,7 +343,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     if (!pay) return !1;
     const updated = _c(pay, form);
     if (!updated) return !1;
-    if (updated.pmtId && setContacts && updated.amt >= 0) {
+    if (updated.pmtId && setContacts && updated.amt >= 0 && updated.source !== "cost") {
       const con = contacts.find((c) => c.id === updated.contractorId),
         scope = con == null ? void 0 : (con.scopes || []).find((sc) => sc.id === updated.scopeId),
         stage = (scope == null ? void 0 : scope.stages || []).find(
@@ -419,7 +443,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         stageId && (scope.stages || []).find((st) => st.id === stageId),
       stageName =
         (stage == null ? void 0 : stage.name) ||
-        linkedStage ||
+        (linkedStage && linkedStage !== "—" ? linkedStage : "") ||
         "",
       projectId = pid || scope.pid || (contact.pids || [])[0] || "p1",
       ms =
@@ -482,7 +506,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ),
         ),
       toast(
-        existingPmtId ? "Payment updated ✅" : "Contractor paid ✅",
+        existingPmtId ? "Payment updated ✅" : "Payment recorded — added to Budget ✅",
       ));
     return !0;
   },
@@ -531,52 +555,40 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       return;
     }
     const shouldSync =
-        syncHint === "sync" ||
-        (syncHint === "ask" && co.syncChoice === "sync") ||
-        (!!pay.pmtId && co.syncChoice === "sync"),
+        !!pay.pmtId &&
+        pay.contractorId &&
+        (syncHint === "sync" ||
+          (syncHint === "ask" && co.syncChoice === "sync")),
       paidDate = wu(co.paidDate) || new Date().toISOString().split("T")[0];
     let pmtId = pay.pmtId || "";
     if (shouldSync && pay.contractorId && Lu(pay.amt) != null && pay.amt >= 0) {
       const contractor = contacts.find((c) => c.id === pay.contractorId);
-      if (contractor) {
+      if (contractor && pmtId) {
         const scope = (contractor.scopes || []).find(
             (sc) => sc.id === pay.scopeId,
           ),
           stage = (scope == null ? void 0 : scope.stages || []).find(
             (st) => st.id === pay.stageId,
           );
-        let pmts = [...(contractor.pmts || [])];
-        pmtId
-          ? (pmts = pmts.map((p) =>
-              p.id === pmtId
-                ? {
-                    ...p,
-                    status: "paid",
-                    paidDate,
-                    method: co.method || "",
-                    conf: co.conf || "",
-                    amt: pay.amt,
-                  }
-                : p,
-            ))
-          : ((pmtId = ve()),
-            pmts.push({
-              id: pmtId,
-              num: pmts.length + 1,
-              amt: pay.amt,
-              due: paidDate,
-              milestone: Ff(pay),
-              linkedStage: (stage == null ? void 0 : stage.name) || "",
-              scopeId: pay.scopeId || "",
-              status: "paid",
-              paidDate,
-              method: co.method || "",
-              conf: co.conf || "",
-              receiptDocId: "",
-            }));
         setContacts((cons) =>
           cons.map((c) =>
-            c.id === pay.contractorId ? { ...c, pmts } : c,
+            c.id !== pay.contractorId
+              ? c
+              : {
+                  ...c,
+                  pmts: (c.pmts || []).map((p) =>
+                    p.id === pmtId
+                      ? {
+                          ...p,
+                          status: "paid",
+                          paidDate,
+                          method: co.method || "",
+                          conf: co.conf || "",
+                          amt: pay.amt,
+                        }
+                      : p,
+                  ),
+                },
           ),
         );
       }
@@ -666,10 +678,16 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       total: Math.round(fe + G + ft),
     };
   },
+  IsStageCost = (I) => {
+    if (I.source === "pmt" || I.source === "budget") return !1;
+    if (I.source === "cost") return !0;
+    if (I.pmtId) return !1;
+    return !!(I.phId || I.scopeId);
+  },
   kf = (I, b) => {
-    if (!b) return "—";
+    if (!b) return "";
     const fe = (I || []).find((G) => G.id === b);
-    return (fe == null ? void 0 : fe.name) || "—";
+    return (fe == null ? void 0 : fe.name) || "";
   },
   Pf = (I, b, fe, G) => {
     const ft = {},
@@ -687,6 +705,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     return (I || [])
       .filter(
         (Q) =>
+          IsStageCost(Q) &&
           (!G || Q.pid === G) &&
           (Q.phId === fe || (Q.scopeId && $.has(Q.scopeId))),
       )
@@ -703,6 +722,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     (I || [])
       .filter(
         ($) =>
+          IsStageCost($) &&
           $.pid === b &&
           $.scopeId === fe &&
           (!G || $.stageId === G),
@@ -718,12 +738,15 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
   },
   _u = (I, b, fe) => {
     const G = (I.scopes || []).find(($) => $.id === b.scopeId),
+      linked =
+        b.linkedStage && b.linkedStage !== "—" ? b.linkedStage : "",
       stage =
-        G && b.linkedStage
-          ? (G.stages || []).find((st) => st.name === b.linkedStage)
-          : null;
+        G && linked
+          ? (G.stages || []).find((st) => st.name === linked)
+          : null,
+      projectId = fe || (G == null ? void 0 : G.pid) || (I.pids || [])[0] || "p1";
     return {
-      pid: fe || (I.pids || [])[0] || "p1",
+      pid: projectId,
       date:
         b.paidDate ||
         wu(b.due) ||
@@ -732,15 +755,15 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       to: I.name,
       vendor: I.name,
       description:
-        (b.milestone || b.linkedStage || "").trim() ||
+        (b.milestone || linked || "").trim() ||
         `Payment #${b.num}`,
       method: b.method || "",
       cat: "Labor",
       costCat: "labor",
-      notes: `Payment #${b.num} — ${b.milestone || b.linkedStage || ""}`,
+      notes: `Payment #${b.num} — ${b.milestone || linked || ""}`,
       conf: b.conf || "",
       phId: (G == null ? void 0 : G.phId) || "",
-      scopeId: b.scopeId || "",
+      scopeId: b.scopeId || (G == null ? void 0 : G.id) || "",
       stageId: (stage == null ? void 0 : stage.id) || "",
       pmtId: b.id,
       contractorId: I.id,
@@ -766,8 +789,13 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     ...I,
     pmtId: b.pmtId,
     contractorId: b.contractorId,
-    scopeId: I.scopeId || b.scopeId,
-    phId: I.phId || b.phId,
+    scopeId: b.scopeId || I.scopeId,
+    phId: b.phId || I.phId,
+    stageId: b.stageId || I.stageId,
+    pid: b.pid || I.pid,
+    source: "pmt",
+    costCat: I.costCat || b.costCat || "labor",
+    cat: I.cat || b.cat || "Labor",
   }),
   ju = (I, b, fe) =>
     I.findIndex(
@@ -821,13 +849,24 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       return zu(q, b, fe, G, q[q.length - 1]);
     });
   },
-  Uu = (I, b, fe) => {
-    I &&
-      I(($) =>
-        $.filter(
-          (Q) => !(Q.pmtId === fe && (Q.contractorId === b || !Q.contractorId)),
-        ),
-      );
+  Uu = (I, b, fe, G, ft) => {
+    if (!I) return;
+    I(($) =>
+      $.filter((Q) => {
+        if (Q.pmtId === fe) return !1;
+        if (
+          ft &&
+          G &&
+          (Q.source === "pmt" || Q.pmtId === fe) &&
+          (!Q.pmtId || Q.pmtId === fe) &&
+          (Q.contractorId === b || !Q.contractorId) &&
+          Nu(G, Q) &&
+          Number(Q.amt) === Number(ft.amt)
+        )
+          return !1;
+        return !0;
+      }),
+    );
   },
   Ru = (I, b) => {
     let fe = [...(I || [])];
@@ -836,7 +875,16 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       for (const $ of ft.pmts || [])
         $.status === "paid" && G.add(`${ft.id}:${$.id}`);
     fe = fe.filter((ft) => {
-      if (!ft.pmtId) return true;
+      if (ft.source === "pmt" && !ft.pmtId)
+        return (b || []).some((q) =>
+          (q.pmts || []).some(
+            (p) =>
+              p.status === "paid" &&
+              Nu(q, ft) &&
+              Number(p.amt) === Number(ft.amt),
+          ),
+        );
+      if (!ft.pmtId) return !0;
       if (ft.contractorId) return G.has(`${ft.contractorId}:${ft.pmtId}`);
       return (b || []).some((q) =>
         (q.pmts || []).some(
@@ -844,19 +892,43 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         ),
       );
     });
+    fe = fe.map((pay, idx, arr) => {
+      if (
+        !pay.pmtId ||
+        !pay.contractorId ||
+        (pay.phId && pay.scopeId)
+      )
+        return pay;
+      const con = (b || []).find((c) => c.id === pay.contractorId),
+        pmt = con == null ? void 0 : (con.pmts || []).find(
+          (p) => p.id === pay.pmtId,
+        );
+      if (!con || !pmt || pmt.status !== "paid") return pay;
+      const scope = (con.scopes || []).find((s) => s.id === pmt.scopeId),
+        projectId =
+          (scope == null ? void 0 : scope.pid) ||
+          (con.pids || [])[0] ||
+          pay.pid ||
+          "p1";
+      return Ou(pay, _u(con, pmt, projectId));
+    });
     for (const ft of b || []) {
-      const $ = (ft.pids || [])[0] || "p1";
       for (const Q of ft.pmts || [])
         if (Q.status === "paid") {
-          const oe = _u(ft, Q, $);
+          const scope = (ft.scopes || []).find((s) => s.id === Q.scopeId),
+            projectId =
+              (scope == null ? void 0 : scope.pid) ||
+              (ft.pids || [])[0] ||
+              "p1",
+            oe = _u(ft, Q, projectId);
           let q = ju(fe, ft.id, Q.id);
           if (q < 0) {
-            const Ve = Tu(fe, ft, Q, $);
+            const Ve = Tu(fe, ft, Q, projectId);
             Ve >= 0
               ? ((fe[Ve] = Ou(fe[Ve], oe)), (q = Ve))
               : (fe.push({ ...oe, id: ve() }), (q = fe.length - 1));
           } else fe[q] = Ou(fe[q], oe);
-          fe = zu(fe, ft, Q, $, fe[q]);
+          fe = zu(fe, ft, Q, projectId, fe[q]);
         }
     }
     return fe;
@@ -2449,7 +2521,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ? "0"
           : kn
             ? `${ze.length} / —`
-            : `${ze.length} / $${Ee.toLocaleString()}`,
+            : `${ze.length} / ${FmtUsd(Ee)}`,
       pt2 = x - m,
       ge2 = x ? Math.round((m / x) * 100) : 0,
       Vn = { cursor: "pointer" },
@@ -2609,14 +2681,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsx(nr, {
                     icon: Lc,
                     label: "חוזה מקורי",
-                    value: `$${pt.toLocaleString()}`,
+                    value: `${FmtUsd(pt)}`,
                   }),
                 ),
                 Fn(
                   l.jsx(nr, {
                     icon: bc,
                     label: "שינויי הזמנה מאושרים",
-                    value: `$${ge.toLocaleString()}`,
+                    value: `${FmtUsd(ge)}`,
                     color: u.blue,
                   }),
                 ),
@@ -2624,14 +2696,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsx(nr, {
                     icon: Oc,
                     label: "ערך חוזה נוכחי",
-                    value: `$${ce.toLocaleString()}`,
+                    value: `${FmtUsd(ce)}`,
                   }),
                 ),
                 Fn(
                   l.jsx(nr, {
                     icon: Pm,
                     label: "הוצאות",
-                    value: `$${m.toLocaleString()}`,
+                    value: `${FmtUsd(m)}`,
                     color: u.yellow,
                   }),
                 ),
@@ -2639,7 +2711,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsx(nr, {
                     icon: di,
                     label: "רווח",
-                    value: `$${De.toLocaleString()}`,
+                    value: `${FmtUsd(De)}`,
                     color: De >= 0 ? u.green : u.red,
                   }),
                 ),
@@ -2657,14 +2729,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsx(nr, {
                     icon: Oc,
                     label: "תקציב",
-                    value: `$${x.toLocaleString()}`,
+                    value: `${FmtUsd(x)}`,
                   }),
                 ),
                 Fn(
                   l.jsx(nr, {
                     icon: Pm,
                     label: "הוצאות",
-                    value: `$${m.toLocaleString()}`,
+                    value: `${FmtUsd(m)}`,
                     color: m > x * 0.9 ? u.red : u.yellow,
                   }),
                 ),
@@ -2672,7 +2744,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsx(nr, {
                     icon: di,
                     label: "נותר",
-                    value: `$${pt2.toLocaleString()}`,
+                    value: `${FmtUsd(pt2)}`,
                     color: u.green,
                   }),
                 ),
@@ -2823,7 +2895,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               fontWeight: 600,
                               fontFamily: "'JetBrains Mono'",
                             },
-                            children: ["$", y.amt.toLocaleString()],
+                            children: ["$", FmtAmt(y.amt)],
                           }),
                         ],
                       },
@@ -3183,8 +3255,25 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       pd = () => {
         if (PcStop(pj, n, i)) return;
         if (!Om) return;
-        const v = zf(r, Om),
-          g = v.find((I) => I.id === Jp.scopeId);
+        const v = zf(r, Om);
+        let scopeId = Jp.scopeId;
+        if (!scopeId && Jp.existingPmtId) {
+          for (const sc of v) {
+            const con = r.find((c) => c.id === sc.conId),
+              pmt = con == null ? void 0 : (con.pmts || []).find(
+                (p) => p.id === Jp.existingPmtId,
+              );
+            if (
+              pmt &&
+              (!pmt.scopeId || pmt.scopeId === sc.id)
+            ) {
+              scopeId = sc.id;
+              break;
+            }
+          }
+        }
+        if (!scopeId && v.length === 1) scopeId = v[0].id;
+        const g = v.find((I) => I.id === scopeId);
         if (!g) return alert("Please select a contractor scope.");
         rm(
           st,
@@ -3192,7 +3281,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           r,
           {
             contactId: g.conId,
-            scopeId: Jp.scopeId,
+            scopeId,
             stageId: Jp.stageId,
             pid: n,
             amt: Jp.amt,
@@ -3238,7 +3327,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         (Lf((fe) => [...fe, b]),
           Wf(!1),
           Gf(null),
-          i("Cost added ✅"));
+          i("Cost added — included in Budget ✅"));
       },
       td = (v) => {
         if (PcStop(pj, n, i)) return;
@@ -3249,15 +3338,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             conId: v.conId,
             scopeId: v.scopeId,
             costId: v.id,
-            syncHint: Fu(pay.amt)
-              ? "paid_only"
-              : xf(
-                  pay.vendor,
-                  pay.costCat || pay.cat,
-                  g,
-                  pay.pmtId,
-                  pay.description,
-                ),
+            syncHint: pay.pmtId && !Fu(pay.amt) ? "sync" : "paid_only",
           }));
       },
       nd = (v) => {
@@ -3694,7 +3775,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                     },
                                     children: [
                                       "💰 $",
-                                      ne(G).toLocaleString(),
+                                      FmtAmt(ne(G)),
                                       " (",
                                       (G.materials || []).length,
                                       " פריטים)",
@@ -3724,7 +3805,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                           },
                                           children: [
                                             "🧾 $",
-                                            An.total.toLocaleString(),
+                                            FmtAmt(An.total),
                                             " costs",
                                             kn > 0 ? ` · ${kn} pending` : "",
                                           ],
@@ -3791,10 +3872,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                               ],
                                             }),
                                             (ie.stages || []).map((lt, Ri) => {
-                                              const Ke = ie.pmts.find(
-                                                (na) =>
-                                                  na.linkedStage === lt.name ||
-                                                  na.milestone === lt.name,
+                                              const stagePmts = ie.pmts.filter(
+                                                (na) => PmStg(na, lt.name),
                                               );
                                               return l.jsxs(
                                                 "div",
@@ -3807,6 +3886,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                     color: u.text2,
                                                     paddingRight: 20,
                                                     marginTop: 1,
+                                                    flexWrap: "wrap",
                                                   },
                                                   children: [
                                                     l.jsx("span", {
@@ -3841,31 +3921,99 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                           }),
                                                       ],
                                                     }),
-                                                    Ke &&
-                                                      l.jsxs("span", {
-                                                        style: {
-                                                          fontSize: 9,
-                                                          color:
+                                                    stagePmts.map((Ke) =>
+                                                      l.jsxs(
+                                                        "span",
+                                                        {
+                                                          style: {
+                                                            fontSize: 9,
+                                                            color:
+                                                              Ke.status ===
+                                                              "paid"
+                                                                ? u.green
+                                                                : u.yellow,
+                                                          },
+                                                          children: [
+                                                            "💰 #",
+                                                            Ke.num,
+                                                            " $",
+                                                            FmtAmt(Ke.amt),
+                                                            " ",
                                                             Ke.status === "paid"
-                                                              ? u.green
-                                                              : u.yellow,
+                                                              ? "✅"
+                                                              : "⏳",
+                                                          ],
                                                         },
-                                                        children: [
-                                                          "💰 #",
-                                                          Ke.num,
-                                                          " $",
-                                                          Ke.amt.toLocaleString(),
-                                                          " ",
-                                                          Ke.status === "paid"
-                                                            ? "✅"
-                                                            : "⏳",
-                                                        ],
-                                                      }),
+                                                        Ke.id,
+                                                      ),
+                                                    ),
                                                   ],
                                                 },
                                                 lt.id,
                                               );
                                             }),
+                                            (() => {
+                                              const shown = new Set();
+                                              (ie.stages || []).forEach((lt) => {
+                                                ie.pmts
+                                                  .filter((na) =>
+                                                    PmStg(na, lt.name),
+                                                  )
+                                                  .forEach((na) =>
+                                                    shown.add(na.id),
+                                                  );
+                                              });
+                                              return ie.pmts
+                                                .filter(
+                                                  (na) => !shown.has(na.id),
+                                                )
+                                                .map((Ke) =>
+                                                  l.jsxs(
+                                                    "div",
+                                                    {
+                                                      style: {
+                                                        display: "flex",
+                                                        alignItems: "center",
+                                                        gap: 4,
+                                                        fontSize: 10,
+                                                        color: u.text2,
+                                                        paddingRight: 20,
+                                                        marginTop: 1,
+                                                      },
+                                                      children: [
+                                                        l.jsx("span", {
+                                                          style: { flex: 1 },
+                                                          children:
+                                                            Ke.milestone ||
+                                                            Ke.linkedStage ||
+                                                            "Scope payment",
+                                                        }),
+                                                        l.jsxs("span", {
+                                                          style: {
+                                                            fontSize: 9,
+                                                            color:
+                                                              Ke.status ===
+                                                              "paid"
+                                                                ? u.green
+                                                                : u.yellow,
+                                                          },
+                                                          children: [
+                                                            "💰 #",
+                                                            Ke.num,
+                                                            " $",
+                                                            FmtAmt(Ke.amt),
+                                                            " ",
+                                                            Ke.status === "paid"
+                                                              ? "✅"
+                                                              : "⏳",
+                                                          ],
+                                                        }),
+                                                      ],
+                                                    },
+                                                    Ke.id,
+                                                  ),
+                                                );
+                                            })(),
                                             l.jsx(wn, {
                                               val: Qt
                                                 ? Math.round((gn / Qt) * 100)
@@ -4153,7 +4301,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               " ",
                               l.jsxs("strong", {
                                 style: { fontFamily: "'JetBrains Mono'" },
-                                children: ["$", oe(o).toLocaleString()],
+                                children: ["$", FmtAmt(oe(o))],
                               }),
                             ],
                           }),
@@ -4200,7 +4348,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                   fontFamily: "'JetBrains Mono'",
                                   color: u.accent,
                                 },
-                                children: ["$", ne(o).toLocaleString()],
+                                children: ["$", FmtAmt(ne(o))],
                               }),
                             ],
                           }),
@@ -4348,15 +4496,15 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                         children: [
                                           v.qty,
                                           " × $",
-                                          (v.unitPrice || 0).toLocaleString(),
+                                          FmtAmt((v.unitPrice || 0)),
                                           " = ",
                                           l.jsxs("strong", {
                                             children: [
                                               "$",
-                                              (
+                                              FmtAmt((
                                                 (v.qty || 0) *
                                                 (v.unitPrice || 0)
-                                              ).toLocaleString(),
+                                              )),
                                             ],
                                           }),
                                         ],
@@ -4741,7 +4889,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           margin: "0 0 8px",
                         },
                         children:
-                          "Stage expenses from the job site. Linked to contractor scopes for this phase.",
+                          "Stage cost tracking for this phase. Also included in Budget. Use + Pay for contractor payments.",
                       }),
                       v.length > 0
                         ? l.jsxs(l.Fragment, {
@@ -4782,7 +4930,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                           },
                                           children: [
                                             "$",
-                                            fe.toLocaleString(),
+                                            FmtAmt(fe),
                                           ],
                                         }),
                                       ],
@@ -4968,9 +5116,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                               children: [
                                                 Fu(b.amt) ? "-" : "",
                                                 "$",
-                                                Math.abs(
+                                                FmtAmt(Math.abs(
                                                   Number(b.amt) || 0,
-                                                ).toLocaleString(),
+                                                )),
                                               ],
                                             }),
                                             l.jsx("td", {
@@ -5513,7 +5661,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               },
                               children: [
                                 "$",
-                                v.amt.toLocaleString(),
+                                FmtAmt(v.amt),
                                 " ",
                                 v.status === "paid" ? "✅" : "⏳",
                               ],
@@ -5962,7 +6110,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                         marginTop: 4,
                       },
                       children:
-                        "Records on Contractor Payments and syncs to project expenses automatically.",
+                        "Records on Contractor Payments and adds the expense to Budget. Does not create a stage Cost.",
                     }),
                   ],
                 }),
@@ -6019,16 +6167,18 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                         Kp((G) => ({
                           ...G,
                           existingPmtId: I,
+                          scopeId: (b == null ? void 0 : b.scopeId) || G.scopeId,
                           amt: b ? String(b.amt) : G.amt,
                           stageId: $e ? $e.id : G.stageId,
-                          milestone: (b == null ? void 0 : b.milestone) || G.milestone,
+                          milestone:
+                            (b == null ? void 0 : b.milestone) || G.milestone,
                         }));
                       },
                       opts: [
                         { v: "", l: "— New payment —" },
                         ...g.map((I) => ({
                           v: I.id,
-                          l: `#${I.num} · $${Number(I.amt || 0).toLocaleString()} · ${I.milestone || I.linkedStage || "Payment"}`,
+                          l: `#${I.num} · ${FmtUsd(Number(I.amt || 0))} · ${I.milestone || I.linkedStage || "Payment"}`,
                         })),
                       ],
                     })
@@ -6310,7 +6460,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           (mf.find((b) => b.v === (g.costCat || g.cat)) || {})
                             .l || g.cat,
                           " — $",
-                          Math.abs(Number(g.amt) || 0).toLocaleString(),
+                          FmtAmtAbs(g.amt),
                         ],
                       }),
                     ],
@@ -6836,10 +6986,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         };
         return w[z] || u.text3;
       },
-      cn = (z) =>
-        z == null || z === ""
-          ? "—"
-          : `$${(typeof z === "number" ? z : parseFloat(z) || 0).toLocaleString()}`,
+      cn = (z) => (z == null || z === "" ? "—" : FmtUsd(z)),
       B = n ? i.filter((z) => (z.pids || []).includes(n)) : i,
       V = (z) => {
         const w = s.find((L) => L.id === z);
@@ -6957,12 +7104,12 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 l.jsx(nr, {
                   icon: Lc,
                   label: "חוזה מקורי",
-                  value: `$${W.toLocaleString()}`,
+                  value: `${FmtUsd(W)}`,
                 }),
                 l.jsx(nr, {
                   icon: bc,
                   label: "שינויי הזמנה",
-                  value: `$${Zt.toLocaleString()}`,
+                  value: `${FmtUsd(Zt)}`,
                   sub: en.length
                     ? `${en.length} ממתינים`
                     : void 0,
@@ -6971,18 +7118,18 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 l.jsx(nr, {
                   icon: Oc,
                   label: "ערך חוזה נוכחי",
-                  value: `$${tn.toLocaleString()}`,
+                  value: `${FmtUsd(tn)}`,
                 }),
                 l.jsx(nr, {
                   icon: Pm,
                   label: "הוצאות",
-                  value: `$${F.toLocaleString()}`,
+                  value: `${FmtUsd(F)}`,
                   color: u.yellow,
                 }),
                 l.jsx(nr, {
                   icon: di,
                   label: "רווח",
-                  value: `$${nn.toLocaleString()}`,
+                  value: `${FmtUsd(nn)}`,
                   color: nn >= 0 ? u.green : u.red,
                 }),
               ]
@@ -6990,18 +7137,18 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 l.jsx(nr, {
                   icon: Oc,
                   label: "תקציב",
-                  value: `$${W.toLocaleString()}`,
+                  value: `${FmtUsd(W)}`,
                 }),
                 l.jsx(nr, {
                   icon: Pm,
                   label: "הוצאות",
-                  value: `$${F.toLocaleString()}`,
+                  value: `${FmtUsd(F)}`,
                   color: F > W * 0.9 ? u.red : u.yellow,
                 }),
                 l.jsx(nr, {
                   icon: di,
                   label: "נותר",
-                  value: `$${(W - F).toLocaleString()}`,
+                  value: `${FmtUsd((W - F))}`,
                   color: u.green,
                 }),
               ],
@@ -7299,7 +7446,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             children: [
                               z.milestone,
                               " • $",
-                              z.amt.toLocaleString(),
+                              FmtAmt(z.amt),
                             ],
                           }),
                           z.phaseName &&
@@ -7333,18 +7480,23 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               v: "danger",
                               onClick: () =>
                                 c("למחוק תשלום ממתין?", () => {
-                                  (o((w) =>
-                                    w.map((L) =>
-                                      L.id === z.conId
+                                  const ee = i.find((te) => te.id === z.conId),
+                                    $ = ee == null ? void 0 : (ee.pmts || []).find(
+                                      (Q) => Q.id === z.id,
+                                    );
+                                  (o((te) =>
+                                    te.map((q) =>
+                                      q.id === z.conId
                                         ? {
-                                            ...L,
-                                            pmts: (L.pmts || []).filter(
-                                              (ee) => ee.id !== z.id,
+                                            ...q,
+                                            pmts: (q.pmts || []).filter(
+                                              (oe) => oe.id !== z.id,
                                             ),
                                           }
-                                        : L,
+                                        : q,
                                     ),
                                   ),
+                                    Uu(t, z.conId, z.id, ee, $),
                                     d("תשלום נמחק ✅"));
                                 }),
                               children: "🗑️",
@@ -7445,7 +7597,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             fontWeight: 600,
                             fontFamily: "'JetBrains Mono'",
                           },
-                          children: ["$", z.amt.toLocaleString()],
+                          children: ["$", FmtAmt(z.amt)],
                         }),
                         l.jsx("td", {
                           style: {
@@ -7843,6 +7995,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           pid: n || "p1",
                           ..._,
                           amt: parseFloat(_.amt),
+                          source: "budget",
                         },
                       ]),
                       k({
@@ -7877,7 +8030,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     }),
                     l.jsxs("div", {
                       style: { fontSize: 11, color: u.text2 },
-                      children: [y.milestone, " — $", y.amt.toLocaleString()],
+                      children: [y.milestone, " — $", FmtAmt(y.amt)],
                     }),
                   ],
                 }),
@@ -8077,10 +8230,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       { ask: p, modal: j } = Ti(),
       [E, M] = T.useState({ title: "", desc: "", phId: "", price: "" }),
       [W, F] = T.useState(!1),
+      [xc, _xc] = T.useState(null),
       [B, V] = T.useState({
         amt: "",
         due: "",
+        paidDate: "",
+        method: "",
         milestone: "",
+        notes: "",
         linkedStage: "",
         scopeId: "",
       }),
@@ -8215,6 +8372,21 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             o("Scope נמחק ✅"));
         });
       },
+      yd = (S) => {
+        if (PcStop(pj, r, o)) return;
+        (V({
+          amt: String(S.amt ?? ""),
+          due: wu(S.due) || S.due || "",
+          paidDate: wu(S.paidDate) || S.paidDate || "",
+          method: S.method || "",
+          milestone: S.milestone || "",
+          notes: S.notes || "",
+          linkedStage: S.linkedStage || "",
+          scopeId: S.scopeId || "",
+        }),
+          _xc(S.id),
+          F(!0));
+      },
       hr = () => {
         if (PcStop(pj, r, o)) return;
         try {
@@ -8232,6 +8404,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               return;
             }
           }
+          let na = "";
+          if (B.paidDate && String(B.paidDate).trim()) {
+            na = wu(B.paidDate);
+            if (!na) {
+              alert("Invalid payment date. Please use YYYY-MM-DD format.");
+              return;
+            }
+          }
           if (
             B.scopeId &&
             !(a.scopes || []).some((X) => X.id === B.scopeId)
@@ -8246,6 +8426,44 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             alert("Invalid milestone stage. Please choose a valid stage.");
             return;
           }
+          const O = {
+            amt: "",
+            due: "",
+            paidDate: "",
+            method: "",
+            milestone: "",
+            notes: "",
+            linkedStage: "",
+            scopeId: "",
+          };
+          if (xc) {
+            const ie = (a.pmts || []).find((gn) => gn.id === xc);
+            if (!ie) {
+              alert("Payment not found. Please close and try again.");
+              return;
+            }
+            const gn = {
+              ...ie,
+              amt: N,
+              due: K,
+              paidDate: ie.status === "paid" ? na || ie.paidDate : ie.paidDate,
+              method: B.method || "",
+              milestone: B.milestone,
+              notes: B.notes || "",
+              linkedStage: B.linkedStage || "",
+              scopeId: B.scopeId || "",
+            };
+            (de(a.id, (Ke) => ({
+              ...Ke,
+              pmts: Ke.pmts.map((yl) => (yl.id === xc ? gn : yl)),
+            })),
+              ie.status === "paid" && d && Mu(d, a, gn, r || "p1"),
+              _xc(null),
+              V(O),
+              F(!1),
+              o("Payment updated ✅"));
+            return;
+          }
           const S = {
             id: ve(),
             num: (a.pmts || []).length + 1,
@@ -8256,33 +8474,29 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             scopeId: B.scopeId || "",
             status: "pending",
             paidDate: "",
-            method: "",
+            method: B.method || "",
             conf: "",
+            notes: B.notes || "",
             receiptDocId: "",
           };
           (de(a.id, (X) => ({ ...X, pmts: [...(X.pmts || []), S] })),
-            V({
-              amt: "",
-              due: "",
-              milestone: "",
-              linkedStage: "",
-              scopeId: "",
-            }),
+            V(O),
             F(!1),
             o("תשלום נוסף ✅"));
         } catch (S) {
           (console.error("Add Payment failed:", S),
-            alert("Could not add payment. Please check the form and try again."));
+            alert("Could not save payment. Please check the form and try again."));
         }
       },
       mr = (S) => {
         if (PcStop(pj, r, o)) return;
         p("למחוק תשלום?", () => {
-          (de(a.id, (N) => ({
-            ...N,
-            pmts: (N.pmts || []).filter((K) => K.id !== S),
+          const N = (a.pmts || []).find((K) => K.id === S);
+          (de(a.id, (K) => ({
+            ...K,
+            pmts: (K.pmts || []).filter((X) => X.id !== S),
           })),
-            Uu(d, a.id, S),
+            Uu(d, a.id, S, a, N),
             o("תשלום נמחק ✅"));
         });
       },
@@ -8503,7 +8717,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             notes: "",
             stageId: "",
           }),
-          o("Cost added ✅"));
+          o("Cost added — included in Budget ✅"));
       },
       Do = (S, N) => {
         if (PcStop(pj, r, o)) return;
@@ -8512,15 +8726,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           _jc({
             scopeId: S,
             costId: N.id,
-            syncHint: Fu(pay.amt)
-              ? "paid_only"
-              : xf(
-                  pay.vendor,
-                  pay.costCat || pay.cat,
-                  a,
-                  pay.pmtId,
-                  pay.description,
-                ),
+            syncHint: pay.pmtId && !Fu(pay.amt) ? "sync" : "paid_only",
           }));
       },
       Qo = (S) => {
@@ -8727,7 +8933,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           l.jsx(Fe, {
             title: a.name,
             onClose: () => {
-              (F(!1), c(null));
+              (_xc(null), F(!1), c(null));
             },
             w: ge ? 680 : 420,
             children: ge
@@ -8943,7 +9149,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                 },
                                                 children: [
                                                   "💰 $",
-                                                  (Number(S.price) || 0).toLocaleString(),
+                                                  FmtAmt(S.price),
                                                 ],
                                               }),
                                               br(a.pmts || [], S) &&
@@ -9597,15 +9803,15 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             X > 0
                               ? {
                                   lbl: "Over Budget",
-                                  val: `+$${X.toLocaleString()}`,
-                                  sub: `Over Budget: +$${X.toLocaleString()}`,
+                                  val: `+${FmtUsd(X)}`,
+                                  sub: `Over Budget: +${FmtUsd(X)}`,
                                   clr: u.red,
                                 }
                               : X < 0
                                 ? {
                                     lbl: "Remaining",
-                                    val: `$${Math.abs(X).toLocaleString()}`,
-                                    sub: `Remaining: $${Math.abs(X).toLocaleString()}`,
+                                    val: `${FmtUsd(Math.abs(X))}`,
+                                    sub: `Remaining: ${FmtUsd(Math.abs(X))}`,
                                     clr: u.yellow,
                                   }
                                 : {
@@ -9637,13 +9843,17 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                     sz: "sm",
                                     icon: Ce,
                                     onClick: () => {
-                                      (V({
-                                        amt: "",
-                                        due: "",
-                                        milestone: "",
-                                        linkedStage: "",
-                                        scopeId: "",
-                                      }),
+                                      (_xc(null),
+                                        V({
+                                          amt: "",
+                                          due: "",
+                                          paidDate: "",
+                                          method: "",
+                                          milestone: "",
+                                          notes: "",
+                                          linkedStage: "",
+                                          scopeId: "",
+                                        }),
                                         F(!0));
                                     },
                                     children: "+ Add Payment",
@@ -9676,7 +9886,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                         fontFamily: "'JetBrains Mono'",
                                         color: u.text,
                                       },
-                                      children: ["$", S.toLocaleString()],
+                                      children: ["$", FmtAmt(S)],
                                     }),
                                   ],
                                 }),
@@ -9699,7 +9909,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                         fontFamily: "'JetBrains Mono'",
                                         color: u.text,
                                       },
-                                      children: ["$", K.toLocaleString()],
+                                      children: ["$", FmtAmt(K)],
                                     }),
                                   ],
                                 }),
@@ -9817,7 +10027,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                 },
                                                 children: [
                                                   "$",
-                                                  Y.amt.toLocaleString(),
+                                                  FmtAmt(Y.amt),
                                                 ],
                                               }),
                                               l.jsxs("td", {
@@ -10078,58 +10288,21 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                 style: { padding: "7px 8px" },
                                                 children:
                                                   !PcLk &&
-                                                  Y.status !== "paid" &&
                                                   l.jsxs(l.Fragment, {
                                                     children: [
                                                       l.jsx(H, {
                                                         sz: "sm",
-                                                        onClick: () => {
-                                                          const O = prompt(
-                                                            "סכום חדש:",
-                                                            Y.amt,
-                                                          );
-                                                          O !== null &&
-                                                            !isNaN(
-                                                              parseFloat(O),
-                                                            ) &&
-                                                            (de(a.id, (ie) => ({
-                                                              ...ie,
-                                                              pmts: ie.pmts.map(
-                                                                (gn) =>
-                                                                  gn.id === Y.id
-                                                                    ? {
-                                                                        ...gn,
-                                                                        amt: parseFloat(
-                                                                          O,
-                                                                        ),
-                                                                      }
-                                                                    : gn,
-                                                              ),
-                                                            })),
-                                                            Y.status ===
-                                                              "paid" &&
-                                                              d &&
-                                                              Mu(
-                                                                d,
-                                                                a,
-                                                                {
-                                                                  ...Y,
-                                                                  amt: parseFloat(
-                                                                    O,
-                                                                  ),
-                                                                },
-                                                                r || "p1",
-                                                              ),
-                                                            o("סכום עודכן ✅"));
-                                                        },
+                                                        onClick: () => yd(Y),
                                                         children: "✏️",
                                                       }),
-                                                      l.jsx(H, {
-                                                        sz: "sm",
-                                                        v: "success",
-                                                        onClick: () => gr(Y.id),
-                                                        children: "Mark Paid",
-                                                      }),
+                                                      Y.status !== "paid" &&
+                                                        l.jsx(H, {
+                                                          sz: "sm",
+                                                          v: "success",
+                                                          onClick: () =>
+                                                            gr(Y.id),
+                                                          children: "Mark Paid",
+                                                        }),
                                                     ],
                                                   }),
                                               }),
@@ -10267,7 +10440,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                     { v: "", l: "-- Select scope --" },
                                     ...(a.scopes || []).map((ie) => ({
                                       v: ie.id,
-                                      l: `${ie.title || ie.desc} ($${(Number(ie.price) || 0).toLocaleString()})`,
+                                      l: `${ie.title || ie.desc} (${FmtUsd((Number(ie.price) || 0))})`,
                                     })),
                                   ],
                                 }),
@@ -10510,9 +10683,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                     children: [
                                                       Fu(ie.amt) ? "-" : "",
                                                       "$",
-                                                      Math.abs(
+                                                      FmtAmt(Math.abs(
                                                         Number(ie.amt) || 0,
-                                                      ).toLocaleString(),
+                                                      )),
                                                     ],
                                                   }),
                                                   l.jsx("td", {
@@ -10661,7 +10834,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                               },
                                               children: [
                                                 "$",
-                                                gn.toLocaleString(),
+                                                FmtAmt(gn),
                                               ],
                                             }),
                                           ],
@@ -10971,8 +11144,11 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         W &&
           a &&
           l.jsx(Fe, {
-            title: "Add Payment",
-            onClose: () => F(!1),
+            title: xc ? "Edit Payment" : "Add Payment",
+            onClose: () => {
+              (_xc(null),
+                F(!1));
+            },
             w: 420,
             children: l.jsxs("div", {
               style: { display: "flex", flexDirection: "column", gap: 10 },
@@ -10985,8 +11161,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     fontSize: 11,
                     color: u.text2,
                   },
-                  children:
-                    "Enter the exact amount you want for this payment. Payments are not auto-calculated.",
+                  children: xc
+                    ? "Update payment details. Paid payments sync to Budget automatically."
+                    : "Enter the exact amount you want for this payment. Payments are not auto-calculated.",
                 }),
                 l.jsx(D, {
                   label: "Amount ($)",
@@ -10995,11 +11172,37 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   onChange: (S) => V((N) => ({ ...N, amt: S })),
                   ph: "Enter exact amount",
                 }),
+                (() => {
+                  const S = xc
+                    ? (a.pmts || []).find((K) => K.id === xc)
+                    : null;
+                  return S != null && S.status === "paid"
+                    ? l.jsx(D, {
+                        label: "Payment Date",
+                        type: "date",
+                        value: wu(B.paidDate) || "",
+                        onChange: (K) =>
+                          V((X) => ({ ...X, paidDate: K })),
+                      })
+                    : l.jsx(D, {
+                        label: "Due Date",
+                        type: "date",
+                        value: wu(B.due) || "",
+                        onChange: (K) => V((X) => ({ ...X, due: K })),
+                      });
+                })(),
                 l.jsx(D, {
-                  label: "Due Date",
-                  type: "date",
-                  value: wu(B.due) || "",
-                  onChange: (S) => V((N) => ({ ...N, due: S })),
+                  label: "Payment Method",
+                  value: B.method,
+                  onChange: (S) => V((N) => ({ ...N, method: S })),
+                  opts: [
+                    { v: "", l: "—" },
+                    { v: "Check", l: "Check" },
+                    { v: "Wire", l: "Wire" },
+                    { v: "Zelle", l: "Zelle" },
+                    { v: "Cash", l: "Cash" },
+                    { v: "CC", l: "Credit Card" },
+                  ],
                 }),
                 l.jsx(D, {
                   label: "Linked Scope of Work",
@@ -11019,19 +11222,21 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     { v: "", l: "-- Select scope --" },
                     ...(a.scopes || []).map((S) => ({
                       v: S.id,
-                      l: `${S.title || S.desc} ($${(Number(S.price) || 0).toLocaleString()})`,
+                      l: `${S.title || S.desc} (${FmtUsd((Number(S.price) || 0))})`,
                     })),
                   ],
                 }),
                 l.jsx(D, {
-                  label: "Linked Milestone (Scope Stage)",
+                  label: "Linked Stage",
                   value: B.linkedStage || "",
                   onChange: (S) => {
                     const N = Xe.find((K) => K.name === S);
                     V((K) => ({
                       ...K,
                       linkedStage: S,
-                      milestone: N ? `${N.scopeTitle} → ${N.name}` : S,
+                      milestone: N
+                        ? `${N.scopeTitle} → ${N.name}`
+                        : K.milestone,
                     }));
                   },
                   opts: [
@@ -11043,10 +11248,16 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   ],
                 }),
                 l.jsx(D, {
-                  label: "Notes",
+                  label: "Milestone",
                   value: B.milestone,
                   onChange: (S) => V((N) => ({ ...N, milestone: S })),
-                  ph: "Optional description",
+                  ph: "Payment milestone label",
+                }),
+                l.jsx(D, {
+                  label: "Notes",
+                  value: B.notes,
+                  onChange: (S) => V((N) => ({ ...N, notes: S })),
+                  ph: "Optional notes",
                 }),
                 (() => {
                   const S = ((a == null ? void 0 : a.scopes) || []).reduce(
@@ -11055,7 +11266,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     ),
                     K =
                       ((a == null ? void 0 : a.pmts) || []).reduce(
-                        (X, Y) => X + Y.amt,
+                        (X, Y) =>
+                          X + (Y.id === xc ? 0 : Y.amt),
                         0,
                       ) + (parseFloat(B.amt) || 0);
                   return (
@@ -11070,9 +11282,11 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       },
                       children: [
                         "Scope total: $",
-                        S.toLocaleString(),
-                        " | After this payment: $",
-                        K.toLocaleString(),
+                        FmtAmt(S),
+                        " | ",
+                        xc ? "After save" : "After this payment",
+                        ": $",
+                        FmtAmt(K),
                         " ",
                         K > S && "⚠️ Exceeds scope!",
                       ],
@@ -11082,8 +11296,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 l.jsx(H, {
                   onClick: hr,
                   v: "success",
-                  icon: Ce,
-                  children: "Add Payment",
+                  icon: xc ? Nt : Ce,
+                  children: xc ? "Save Changes" : "Add Payment",
                 }),
               ],
             }),
@@ -11391,7 +11605,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           (mf.find((X) => X.v === Nf(K).cat) || {}).l ||
                             Nf(K).cat,
                           " — $",
-                          Math.abs(Number(K.amt) || 0).toLocaleString(),
+                          FmtAmtAbs(K.amt),
                           K.stageId &&
                             l.jsxs(l.Fragment, {
                               children: [
@@ -12094,7 +12308,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         .forEach((h) =>
           m.push({
             id: h.id,
-            title: `💰 ${C.name} #${h.num} $${h.amt.toLocaleString()}`,
+            title: `💰 ${C.name} #${h.num} ${FmtUsd(h.amt)}`,
             date: h.due,
             color: u.yellow,
             type: "💰",
@@ -12456,7 +12670,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           w.items
             .map(
               (te, $) =>
-                `${$ + 1}. ${te.name} — Qty: ${te.qty} × $${te.price} = $${(te.qty * te.price).toLocaleString()}`,
+                `${$ + 1}. ${te.name} — Qty: ${te.qty} × ${FmtUsd(te.price)} = ${FmtUsd(te.qty * te.price)}`,
             )
             .join("%0A");
           const ee = encodeURIComponent(`Hi ${P.name},
@@ -12468,11 +12682,11 @@ Project: ${C}
 
 ${w.items.map(
   (te, $) =>
-    `${$ + 1}. ${te.name} — Qty: ${te.qty} × $${te.price} = $${(te.qty * te.price).toLocaleString()}`,
+    `${$ + 1}. ${te.name} — Qty: ${te.qty} × ${FmtUsd(te.price)} = ${FmtUsd(te.qty * te.price)}`,
 ).join(`
 `)}
 
-Total: $${E.toLocaleString()}
+Total: ${FmtUsd(E)}
 
 Requested Delivery: ${m.deliveryDate || "ASAP"}
 
@@ -12559,7 +12773,7 @@ Thank you`);
                                 " • ",
                                 P.items.length,
                                 " items • $",
-                                P.total.toLocaleString(),
+                                FmtAmt(P.total),
                               ],
                             }),
                             P.deliveryDate &&
@@ -12709,7 +12923,7 @@ Thank you`);
                                   fontSize: 11,
                                   fontFamily: "'JetBrains Mono'",
                                 },
-                                children: ["$", P.price],
+                                children: FmtUsd(P.price),
                               }),
                               l.jsxs("td", {
                                 style: {
@@ -12720,7 +12934,7 @@ Thank you`);
                                 },
                                 children: [
                                   "$",
-                                  (P.qty * P.price).toLocaleString(),
+                                  FmtAmt((P.qty * P.price)),
                                 ],
                               }),
                             ],
@@ -12750,7 +12964,7 @@ Thank you`);
                               fontWeight: 700,
                               fontFamily: "'JetBrains Mono'",
                             },
-                            children: ["$", a.total.toLocaleString()],
+                            children: ["$", FmtAmt(a.total)],
                           }),
                         ],
                       }),
@@ -12824,7 +13038,7 @@ Thank you`);
 
 Following up on Order #${a.num}.
 
-Total: $${a.total.toLocaleString()}
+Total: ${FmtUsd(a.total)}
 
 Thank you`);
                       try {
@@ -12970,7 +13184,7 @@ Thank you`);
                         fontFamily: "'JetBrains Mono'",
                         color: u.accent,
                       },
-                      children: ["$", E.toLocaleString()],
+                      children: ["$", FmtAmt(E)],
                     }),
                   ],
                 }),
@@ -13028,7 +13242,7 @@ Thank you`);
     "Cabinets",
     "Epoxy",
   ],
-  RpFmt = (I) => "$" + Math.round(I || 0).toLocaleString(),
+  RpFmt = FmtUsd,
   RpPct = (I) => (Number.isFinite(I) ? I.toFixed(1) : "0.0") + "%",
   RpScopeIds = (I, b, fe) => {
     const G = new Set();
@@ -13424,7 +13638,7 @@ Thank you`);
               },
               children: [
                 "Expenses: $",
-                ef(I == null ? void 0 : I.pays, Ve).toLocaleString(),
+                FmtAmt(ef(I == null ? void 0 : I.pays, Ve)),
               ],
             }),
           ],
@@ -13586,7 +13800,7 @@ Thank you`);
                       "Last auto-backup: ",
                       Ju(Vn.savedAt),
                       " — Expenses: $",
-                      Vn.expenses.toLocaleString(),
+                      FmtAmt(Vn.expenses),
                     ],
                   }),
                   l.jsx(H, {
@@ -14241,7 +14455,7 @@ Thank you`);
                       ],
                       [
                         "תקציב",
-                        "$" + (parseFloat(i.totalBudget) || 0).toLocaleString(),
+                        FmtUsd(parseFloat(i.totalBudget) || 0),
                       ],
                       ["שלבים", i.phases.filter((f) => f.on).length],
                     ].map(([f, x]) =>
@@ -15109,7 +15323,7 @@ function cg() {
                                   fontWeight: 600,
                                   color: u.green,
                                 },
-                                children: ["$", ne.price.toFixed(2)],
+                                children: FmtUsdDec(ne.price),
                               }),
                           ],
                         }),
