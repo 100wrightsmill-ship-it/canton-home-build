@@ -11,6 +11,24 @@ import {
   SquarePen, Star, Store, Target, Trash2, TrendingDown,
   TriangleAlert, Truck, Upload, X
 } from "lucide-react";
+import {
+  LOCAL_KEY as CC_LOCAL_KEY,
+  STATE_PATH as CC_STATE_PATH,
+  createCloudUploadQueue,
+  fetchStorageJson,
+  fetchCloudStateFirst,
+  resolveBootState,
+  writeLocalCacheSnapshot,
+  uploadDocumentFile,
+  fetchDocumentBlob,
+  documentStoragePath,
+  stateFingerprint,
+  formatFingerprintSummary,
+  listCloudStateBackups,
+  fetchCloudBackup,
+  restoreCloudBackup,
+  getCloudRevision,
+} from "./sync/cloudSync.js";
 
 const Ih=ArrowDown,Nh=ArrowLeft,Th=ArrowUp,ta=Bell,Dc=Building2;
 const Lh=Calendar,Fh=Camera,Wh=ChartColumn,ts=Check;
@@ -1124,8 +1142,24 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             ? "📘"
             : "📄"
       : "📄",
-  pu = (e) => {
+  pu = async (e) => {
     var t;
+    if (e.storagePath) {
+      try {
+        const n = await fetchDocumentBlob(e.storagePath);
+        if (!n.ok || !n.blob) return;
+        const a = URL.createObjectURL(n.blob),
+          c = document.createElement("a");
+        ((c.href = a),
+          (c.download = e.name),
+          document.body.appendChild(c),
+          c.click(),
+          setTimeout(() => {
+            (document.body.removeChild(c), URL.revokeObjectURL(a));
+          }, 300));
+      } catch {}
+      return;
+    }
     if (e.data)
       try {
         const n = e.data.split(","),
@@ -1750,6 +1784,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             name: o.name,
             size: o.size,
             type: o.type,
+            file: o,
             data: a.target.result,
             uploadDate: new Date().toISOString().split("T")[0],
           });
@@ -1782,14 +1817,42 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       r =
         ((a = e.type) == null ? void 0 : a.includes("pdf")) ||
         /\.pdf$/i.test(e.name || ""),
-      [c, f] = T.useState(null);
+      [c, f] = T.useState(null),
+      [_, k] = T.useState(!1),
+      y = !!(e.data || e.storagePath);
     T.useEffect(() => {
-      if (!r || !e.data) return (f(null), void 0);
-      const x = vu(e.data, "application/pdf");
-      return (f(x), () => {
-        x && URL.revokeObjectURL(x);
-      });
-    }, [e.id, e.data, r]);
+      let C = null,
+        h = !1;
+      const p = async () => {
+        if (e.data) {
+          if (r) {
+            const j = vu(e.data, "application/pdf");
+            ((C = j), f(j));
+          } else n ? f(e.data) : f(null);
+          k(!1);
+          return;
+        }
+        if (e.storagePath) {
+          k(!0);
+          const j = await fetchDocumentBlob(e.storagePath);
+          if (h) return;
+          if (j.ok && j.blob) {
+            const E = URL.createObjectURL(j.blob);
+            ((C = E), f(E));
+          } else f(null);
+          k(!1);
+          return;
+        }
+        f(null);
+        k(!1);
+      };
+      return (
+        p(),
+        () => {
+          ((h = !0), C && URL.revokeObjectURL(C));
+        }
+      );
+    }, [e.id, e.data, e.storagePath, n, r]);
     const i = () => {
         try {
           if (r && c) {
@@ -1820,8 +1883,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         } catch {}
       },
       o = () => {
-        if (!e.data) return;
-        if (r && c) {
+        if (!y) return;
+        if (c) {
           const x = document.createElement("a");
           ((x.href = c),
             (x.download = e.name),
@@ -1830,10 +1893,10 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             document.body.removeChild(x));
           return;
         }
-        pu(e);
+        if (e.data) pu(e);
       },
       s = () => {
-        if (!e.data) return;
+        if (!y) return;
         try {
           if (r && c) window.open(c, "_blank");
           else if (n) {
@@ -1886,7 +1949,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             l.jsxs("div", {
               style: { display: "flex", gap: 4 },
               children: [
-                e.data &&
+                y &&
+                  c &&
                   l.jsxs("button", {
                     onClick: s,
                     style: {
@@ -1903,7 +1967,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     },
                     children: [l.jsx(Mc, { size: 12 }), "פתח בטאב"],
                   }),
-                e.data &&
+                y &&
+                  c &&
                   l.jsxs("button", {
                     onClick: o,
                     style: {
@@ -1920,7 +1985,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     },
                     children: [l.jsx($c, { size: 12 }), "הורד"],
                   }),
-                e.data &&
+                y &&
+                  c &&
                   l.jsxs("button", {
                     onClick: i,
                     style: {
@@ -1964,35 +2030,35 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             padding: 20,
           },
           children:
-            n && e.data
-              ? l.jsx("img", {
-                  src: e.data,
-                  alt: e.name,
-                  style: {
-                    maxWidth: "100%",
-                    maxHeight: "100%",
-                    borderRadius: 8,
-                    boxShadow: "0 4px 32px rgba(0,0,0,.5)",
-                  },
+            _ || (r && y && !c)
+              ? l.jsx("div", {
+                  style: { color: "#aaa", fontSize: 13 },
+                  children: "טוען מסמך...",
                 })
-              : r && c
-                ? l.jsx("iframe", {
+              : n && c
+                ? l.jsx("img", {
                     src: c,
-                    title: e.name,
+                    alt: e.name,
                     style: {
-                      width: "100%",
-                      maxWidth: 900,
-                      height: "calc(100vh - 80px)",
-                      border: "none",
+                      maxWidth: "100%",
+                      maxHeight: "100%",
                       borderRadius: 8,
-                      background: "#fff",
                       boxShadow: "0 4px 32px rgba(0,0,0,.5)",
                     },
                   })
-                : r && e.data
-                  ? l.jsx("div", {
-                      style: { color: "#aaa", fontSize: 13 },
-                      children: "טוען PDF...",
+                : r && c
+                  ? l.jsx("iframe", {
+                      src: c,
+                      title: e.name,
+                      style: {
+                        width: "100%",
+                        maxWidth: 900,
+                        height: "calc(100vh - 80px)",
+                        border: "none",
+                        borderRadius: 8,
+                        background: "#fff",
+                        boxShadow: "0 4px 32px rgba(0,0,0,.5)",
+                      },
                     })
                 : l.jsxs("div", {
                     style: { textAlign: "center", color: "#aaa" },
@@ -2919,6 +2985,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     showToast: i,
     pays: Df,
     setPays: Lf,
+    persistDocumentUpload: persistDoc,
   }) => {
     const [o, s] = T.useState(null),
       [wr, kr] = T.useState(null),
@@ -5704,41 +5771,39 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             const v = document.createElement("input");
                             ((v.type = "file"),
                               (v.accept = ".pdf,.doc,.docx,.jpg,.jpeg,.png"),
-                              (v.onchange = (g) => {
+                              (v.onchange = async (g) => {
                                 var b;
                                 const I =
                                   (b = g.target.files) == null ? void 0 : b[0];
                                 if (!I) return;
-                                const fe = new FileReader();
-                                ((fe.onload = ($) => {
-                                  st((G) =>
-                                    G.map((ft) =>
-                                      ft.id !== Dr.conId
-                                        ? ft
-                                        : {
-                                            ...ft,
-                                            docs: [
-                                              ...(ft.docs || []),
-                                              {
-                                                id: ve(),
-                                                name: I.name,
-                                                type: I.type,
-                                                size: I.size,
-                                                uploadDate: new Date()
-                                                  .toISOString()
-                                                  .split("T")[0],
-                                                data: $.target.result,
-                                                scopeId: Dr.id,
-                                                pmtId: "",
-                                                kind: "general",
-                                              },
-                                            ],
-                                          },
-                                    ),
-                                  );
-                                  i("מסמך הועלה ✅");
-                                }),
-                                  fe.readAsDataURL(I));
+                                if (!persistDoc) {
+                                  i("שגיאה בשמירת מסמך ❌");
+                                  return;
+                                }
+                                try {
+                                  await persistDoc({
+                                    file: I,
+                                    scope: "contact",
+                                    contactId: Dr.conId,
+                                    doc: {
+                                      id: ve(),
+                                      pid: n,
+                                      name: I.name,
+                                      type: I.type,
+                                      size: I.size,
+                                      uploadDate: new Date()
+                                        .toISOString()
+                                        .split("T")[0],
+                                      scopeId: Dr.id,
+                                      pmtId: "",
+                                      kind: "general",
+                                    },
+                                  });
+                                  i("מסמך נשמר בענן ✅");
+                                } catch ($) {
+                                  console.error("[CC Doc] contractor upload failed", $);
+                                  i("שגיאה בשמירת מסמך ❌");
+                                }
                               }),
                               v.click());
                           },
@@ -5761,24 +5826,24 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             l.jsx("span", {
                               style: {
                                 fontSize: 14,
-                                cursor: v.data ? "pointer" : "default",
+                                cursor: v.data || v.storagePath ? "pointer" : "default",
                               },
-                              onClick: () => v.data && To(v),
+                              onClick: () => (v.data || v.storagePath) && To(v),
                               children: fi(v.type),
                             }),
                             l.jsxs("div", {
                               style: {
                                 flex: 1,
-                                cursor: v.data ? "pointer" : "default",
+                                cursor: v.data || v.storagePath ? "pointer" : "default",
                               },
-                              onClick: () => v.data && To(v),
+                              onClick: () => (v.data || v.storagePath) && To(v),
                               children: [
                                 l.jsx("div", {
                                   style: {
                                     fontSize: 12,
                                     fontWeight: 500,
-                                    color: v.data ? u.accent : u.text,
-                                    textDecoration: v.data
+                                    color: v.data || v.storagePath ? u.accent : u.text,
+                                    textDecoration: v.data || v.storagePath
                                       ? "underline"
                                       : "none",
                                     textUnderlineOffset: 2,
@@ -5806,7 +5871,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 }),
                               ],
                             }),
-                            v.data &&
+                            (v.data || v.storagePath) &&
                               l.jsx("button", {
                                 onClick: () => To(v),
                                 style: {
@@ -5820,7 +5885,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 title: "צפה",
                                 children: l.jsx(Jh, { size: 13 }),
                               }),
-                            v.data &&
+                            (v.data || v.storagePath) &&
                               l.jsx("button", {
                                 onClick: () => pu(v),
                                 style: {
@@ -8212,6 +8277,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     showToast: o,
     pays: s,
     setPays: d,
+    persistDocumentUpload: persistDoc,
   }) => {
     const [a, c] = T.useState(null),
       [f, x] = T.useState("details"),
@@ -8603,64 +8669,84 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ),
         }));
       },
-      $e = Vt((S) => {
-        (de(a.id, (N) => ({
-          ...N,
-          docs: [
-            ...(N.docs || []),
-            {
-              ...S,
+      $e = Vt(async (S) => {
+        if (!persistDoc || !(S == null ? void 0 : S.file)) {
+          o("שגיאה בשמירת מסמך ❌");
+          return;
+        }
+        try {
+          await persistDoc({
+            file: S.file,
+            scope: "contact",
+            contactId: a.id,
+            doc: {
+              id: S.id || ve(),
+              pid: r,
+              name: S.name,
+              type: S.type,
+              size: S.size,
+              uploadDate: S.uploadDate,
               scopeId: S.scopeId || "",
               pmtId: S.pmtId || "",
               kind: S.kind || "general",
             },
-          ],
-        })),
-          o("מסמך הועלה ✅"));
+          });
+          o("מסמך נשמר בענן ✅");
+        } catch (N) {
+          console.error("[CC Doc] scope upload failed", N);
+          o("שגיאה בשמירת מסמך ❌");
+        }
       }),
       [G, ft] = T.useState(null),
-      Qe = (S) => {
+      Qe = async (S) => {
         var X;
         const N = (X = S.target.files) == null ? void 0 : X[0];
         if (!N || !G) return;
-        const K = new FileReader();
-        ((K.onload = (Y) => {
-          const O = Y.target.result,
-            ie = (a.pmts || []).find((gn) => gn.id === G),
-            Qt = (ie == null ? void 0 : ie.receiptDocId) || ve();
-          (de(a.id, (gn) => {
-            let lt = [...(gn.docs || [])];
-            const Ri = {
+        const ie = (a.pmts || []).find((gn) => gn.id === G),
+          Qt = (ie == null ? void 0 : ie.receiptDocId) || ve();
+        if (!persistDoc) {
+          o("שגיאה בשמירת מסמך ❌");
+          return;
+        }
+        try {
+          await persistDoc({
+            file: N,
+            scope: "contact",
+            contactId: a.id,
+            replaceDocId: Qt,
+            doc: {
               id: Qt,
+              pid: r,
               name: `Payment #${(ie == null ? void 0 : ie.num) || ""} receipt`,
               type: N.type || "image/jpeg",
               size: N.size,
-              data: O,
               uploadDate: new Date().toISOString().split("T")[0],
               scopeId: (ie == null ? void 0 : ie.scopeId) || "",
               pmtId: G,
               kind: "receipt",
-            };
-            return (
-              lt.some((na) => na.id === Qt)
-                ? (lt = lt.map((na) => (na.id === Qt ? Ri : na)))
-                : lt.push(Ri),
-              {
-                ...gn,
-                docs: lt,
-                pmts: gn.pmts.map((na) =>
-                  na.id === G
-                    ? { ...na, receipt: O, receiptDocId: Qt }
-                    : na,
-                ),
-              }
-            );
-          }),
-            o("קבלה צורפה ✅"),
-            ft(null));
-        }),
-          K.readAsDataURL(N),
-          (S.target.value = ""));
+            },
+            patchContact: (gn) => ({
+              ...gn,
+              pmts: gn.pmts.map((na) =>
+                na.id === G
+                  ? { ...na, receiptDocId: Qt, receipt: null }
+                  : na,
+              ),
+            }),
+          });
+          de(a.id, (gn) => ({
+            ...gn,
+            pmts: gn.pmts.map((na) =>
+              na.id === G ? { ...na, receiptDocId: Qt, receipt: null } : na,
+            ),
+          }));
+          o("קבלה נשמרה בענן ✅");
+          ft(null);
+        } catch (Y) {
+          console.error("[CC Doc] receipt upload failed", Y);
+          o("שגיאה בשמירת קבלה ❌");
+        }
+        S.target.value = "";
       },
       No = (S) => {
         p("להסיר קבלה מתשלום זה?", () => {
@@ -10885,7 +10971,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             const Qt = S && typeof S === "object" ? S : {},
                               Ri = Qt.name || "Invalid document",
                               na = Qt.type || "",
-                              yl = !!Qt.data;
+                              yl = !!(Qt.data || Qt.storagePath);
                             return l.jsxs(
                               "div",
                               {
@@ -11781,21 +11867,34 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       ],
     });
   },
-  rg = ({ docs: e, setDocs: t, folders: n, setFolders: r, cp: i }) => {
-    const [o, s] = T.useState(null),
+  rg = ({
+    docs: e,
+    setDocs: t,
+    folders: n,
+    setFolders: r,
+    cp: i,
+    persistDocumentUpload: persistDoc,
+    showToast,
+  }) => {
+    const [folderView, setFolderView] = T.useState(null),
       [d, a] = T.useState(!1),
       [c, f] = T.useState({
         name: "",
         folder: "contracts",
         notes: "",
         expiry: "",
+        fileBlob: null,
+        fileType: "",
+        fileSize: 0,
+        fileData: null,
       }),
       [x, m] = T.useState(null),
       [_, k] = T.useState(!1),
       [y, C] = T.useState(""),
+      [docSaving, setDocSaving] = T.useState(!1),
       { ref: h, pick: p, handleChange: j } = Bc(),
       E = e.filter((w) => !i || w.pid === i),
-      M = o ? E.filter((w) => w.folder === o) : [],
+      M = folderView ? E.filter((w) => w.folder === folderView) : [],
       W = {};
     n.forEach((w) => {
       W[w.key] = E.filter((L) => L.folder === w.key).length;
@@ -11807,27 +11906,50 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           fileType: w.type,
           fileSize: w.size,
           fileData: w.data,
+          fileBlob: w.file,
         }));
       }),
-      B = () => {
-        c.name &&
-          (t((w) => [
-            ...w,
-            {
+      B = async () => {
+        if (!c.name || docSaving) return;
+        if (!c.fileBlob || !persistDoc) {
+          showToast?.("בחר קובץ להעלאה");
+          return;
+        }
+        setDocSaving(!0);
+        try {
+          await persistDoc({
+            file: c.fileBlob,
+            doc: {
               id: ve(),
               pid: i || "p1",
               name: c.name,
-              folder: o || c.folder,
+              folder: folderView || c.folder,
               uploadDate: new Date().toISOString().split("T")[0],
-              type: c.fileType || "",
-              size: c.fileSize || 0,
-              data: c.fileData || null,
+              type: c.fileType || c.fileBlob.type || "",
+              size: c.fileSize || c.fileBlob.size || 0,
               notes: c.notes,
               expiry: c.expiry || null,
             },
-          ]),
-          f({ name: "", folder: "contracts", notes: "", expiry: "" }),
-          a(!1));
+            scope: "docs",
+          });
+          showToast?.("מסמך נשמר בענן ✅");
+          f({
+            name: "",
+            folder: "contracts",
+            notes: "",
+            expiry: "",
+            fileBlob: null,
+            fileType: "",
+            fileSize: 0,
+            fileData: null,
+          });
+          a(!1);
+        } catch (w) {
+          console.error("[CC Doc] upload failed", w);
+          showToast?.("שגיאה בשמירת מסמך ❌");
+        } finally {
+          setDocSaving(!1);
+        }
       },
       V = (w) => {
         (t((L) => L.filter((ee) => ee.id !== w)),
@@ -11984,7 +12106,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 value: c.name,
                 onChange: (w) => f((L) => ({ ...L, name: w })),
               }),
-              !o &&
+              !folderView &&
                 l.jsx(D, {
                   label: "תיקייה",
                   value: c.folder,
@@ -12005,14 +12127,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               l.jsx(H, {
                 onClick: B,
                 icon: vn,
-                disabled: !c.name,
-                children: "שמור",
+                disabled: !c.name || docSaving || !c.fileBlob,
+                children: docSaving ? "שומר..." : "שמור",
               }),
             ],
           }),
         });
-    if (o) {
-      const w = n.find((L) => L.key === o);
+    if (folderView) {
+      const w = n.find((L) => L.key === folderView);
       return l.jsxs("div", {
         children: [
           l.jsxs("div", {
@@ -12026,13 +12148,13 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               l.jsx(H, {
                 v: "ghost",
                 icon: Di,
-                onClick: () => s(null),
+                onClick: () => setFolderView(null),
                 sz: "sm",
                 children: "חזור",
               }),
               l.jsx("h2", {
                 style: { fontSize: 20, fontWeight: 700 },
-                children: (w == null ? void 0 : w.name) || o,
+                children: (w == null ? void 0 : w.name) || folderView,
               }),
               l.jsxs("span", {
                 style: { fontSize: 11, color: u.text3 },
@@ -12105,7 +12227,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               je,
               {
                 hover: !0,
-                onClick: () => s(w.key),
+                onClick: () => setFolderView(w.key),
                 s: {
                   textAlign: "center",
                   padding: 14,
@@ -13530,7 +13652,54 @@ Thank you`);
           return null;
         }
       }),
+      [cloudHist, setCloudHist] = T.useState({
+        loading: !1,
+        items: [],
+        error: null,
+      }),
+      [histPreview, setHistPreview] = T.useState(null),
       pn = i ? i.name : Ve ? "Project" : "All projects",
+      loadCloudHist = () => {
+        setCloudHist({ loading: !0, items: [], error: null });
+        listCloudStateBackups(30).then((g) => {
+          g.ok
+            ? setCloudHist({ loading: !1, items: g.items || [], error: null })
+            : setCloudHist({
+                loading: !1,
+                items: [],
+                error: g.error || "list failed",
+              });
+        });
+      },
+      previewCloudBackup = async (g) => {
+        const I = await fetchCloudBackup(g);
+        if (!I.ok || !I.data) return e("Could not load backup ❌");
+        setHistPreview({
+          path: g,
+          data: I.data,
+          fp: stateFingerprint(I.data),
+        });
+      },
+      confirmCloudHistoryRestore = async () => {
+        if (!histPreview) return;
+        try {
+          const g = localStorage.getItem(rl);
+          if (g) {
+            const I = {
+                ...JSON.parse(g),
+                _autobackupAt: Date.now(),
+                _autobackupSource: "pre-cloud-history-restore",
+              },
+              b = JSON.stringify(I);
+            localStorage.setItem(al, b);
+          }
+        } catch {}
+        const g = await restoreCloudBackup(histPreview.path);
+        if (!g.ok) return e("Cloud restore failed ❌");
+        (Gu("settings-restore-from-cloud", g.data),
+          e("Restoring cloud backup… reloading"),
+          setTimeout(() => window.location.reload(), 800));
+      },
       t = () => {
         const r = localStorage.getItem(rl);
         if (!r) return e("אין נתונים לייצוא");
@@ -13566,10 +13735,10 @@ Thank you`);
           g = I ? JSON.parse(I) : null;
         } catch {}
         (Rt({ local: g, cloud: null, loading: !0 }),
-          yu()
+          fetchStorageJson(CC_STATE_PATH)
             .then((I) => {
-              I
-                ? Rt({ local: g, cloud: I, loading: !1 })
+              I.ok && I.data
+                ? Rt({ local: g, cloud: I.data, loading: !1 })
                 : (Rt(null), e("Could not fetch cloud data ❌"));
             })
             .catch(() => (Rt(null), e("Could not fetch cloud data ❌"))));
@@ -13812,8 +13981,114 @@ Thank you`);
                   }),
                 ],
               }),
+            l.jsxs("div", {
+              style: { marginTop: 14 },
+              children: [
+                l.jsx("h4", {
+                  style: { fontSize: 13, fontWeight: 600, marginBottom: 8 },
+                  children: "☁️ Cloud Backup History",
+                }),
+                l.jsx("p", {
+                  style: { fontSize: 12, color: u.text2, marginBottom: 8 },
+                  children:
+                    "Versioned copies saved automatically before each cloud replace. Restore shows totals and requires confirmation.",
+                }),
+                l.jsx(H, {
+                  v: "secondary",
+                  sz: "sm",
+                  icon: ym,
+                  onClick: loadCloudHist,
+                  children: cloudHist.loading
+                    ? "Loading…"
+                    : "Load backup list",
+                }),
+                cloudHist.error &&
+                  l.jsx("div", {
+                    style: { fontSize: 12, color: u.red, marginTop: 8 },
+                    children: cloudHist.error,
+                  }),
+                cloudHist.items.length > 0 &&
+                  l.jsx("div", {
+                    style: {
+                      marginTop: 8,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      maxHeight: 180,
+                      overflow: "auto",
+                    },
+                    children: cloudHist.items.map((g) =>
+                      l.jsx(
+                        "button",
+                        {
+                          type: "button",
+                          onClick: () => previewCloudBackup(g.name),
+                          style: {
+                            textAlign: "left",
+                            padding: "8px 10px",
+                            borderRadius: 6,
+                            border: `1px solid ${u.border}`,
+                            background: u.card2,
+                            fontSize: 11,
+                            cursor: "pointer",
+                          },
+                          children: g.name,
+                        },
+                        g.name,
+                      ),
+                    ),
+                  }),
+              ],
+            }),
           ],
         }),
+        histPreview &&
+          l.jsx(Fe, {
+            title: "Restore cloud backup",
+            onClose: () => setHistPreview(null),
+            w: 520,
+            children: l.jsxs("div", {
+              children: [
+                l.jsxs("p", {
+                  style: { fontSize: 12, color: u.text2, marginBottom: 10 },
+                  children: ["File: ", histPreview.path],
+                }),
+                l.jsxs("div", {
+                  style: { fontSize: 12, marginBottom: 12, lineHeight: 1.6 },
+                  children: [
+                    "Saved: ",
+                      Ju(histPreview.data.savedAt),
+                      l.jsx("br", {}),
+                      "Revision: ",
+                      getCloudRevision(histPreview.data),
+                      l.jsx("br", {}),
+                      formatFingerprintSummary(histPreview.fp),
+                  ],
+                }),
+                l.jsx("p", {
+                  style: { fontSize: 11, color: u.text3, marginBottom: 12 },
+                  children:
+                    "Current local data will be auto-backed up before restore. Cloud current state is archived before replace.",
+                }),
+                l.jsxs("div", {
+                  style: { display: "flex", gap: 8, justifyContent: "flex-end" },
+                  children: [
+                    l.jsx(H, {
+                      v: "secondary",
+                      onClick: () => setHistPreview(null),
+                      children: "Cancel",
+                    }),
+                    l.jsx(H, {
+                      v: "danger",
+                      icon: ym,
+                      onClick: confirmCloudHistoryRestore,
+                      children: "Confirm restore",
+                    }),
+                  ],
+                }),
+              ],
+            }),
+          }),
         mn &&
           l.jsx(Fe, {
             title: "Restore from Cloud",
@@ -14517,7 +14792,7 @@ Thank you`);
       ],
     });
   },
-  rl = "cc_data_v1",
+  rl = CC_LOCAL_KEY,
   wd = "zfjnvrxmo8rj9ui",
   Yu = (g) => {
     const I = (g || []).filter((b) => b.pid === wd);
@@ -14538,25 +14813,24 @@ Thank you`);
             })()
           : b,
       ft = Yu(G == null ? void 0 : G.pays),
-      $ = typeof b === "string" ? b : JSON.stringify(b),
-      Qe = $.length;
-    let oe = !0,
-      q = null;
-    try {
-      localStorage.setItem(rl, $);
-    } catch (Ve) {
-      ((oe = !1), (q = Ve));
-    }
+      Qe = typeof b === "string" ? b.length : JSON.stringify(b).length,
+      write = writeLocalCacheSnapshot(G),
+      oe = write.ok,
+      q = write.error,
+      slimmed = write.slimmed,
+      storedBytes = write.bytes;
     const ne = {
       ts: Date.now(),
       tsISO: new Date().toISOString(),
       source: I,
       ok: oe,
-      error: q ? q.name + ": " + (q.message || String(q)) : void 0,
+      slimmed,
+      error: q,
       jordanPaysLen: ft.count,
       jordanPaysSum: ft.sum,
       paysLen: ((G == null ? void 0 : G.pays) || []).length,
-      bytes: Qe,
+      bytes: storedBytes,
+      fullBytes: Qe,
       savedAt: G == null ? void 0 : G.savedAt,
       ...fe,
     };
@@ -14575,7 +14849,8 @@ Thank you`);
           (ne.readBackError = Ve.message || String(Ve)));
       }
       console.log("[CC LS] setItem ok", ne);
-    } else console.error("[CC LS] setItem FAILED", ne);
+    } else
+      console.error("[CC LS] setItem FAILED", ne);
     try {
       const Ve = JSON.parse(sessionStorage.getItem("cc_ls_write_log") || "[]");
       (Ve.push(ne),
@@ -14642,34 +14917,41 @@ Thank you`);
       return (console.error("[CC LS] read startup parse failed", e), null);
     }
   },
-  Uc = "https://bdckzzweimrmvcvvahbr.supabase.co",
-  hi =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJkY2t6endlaW1ybXZjdnZhaGJyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTUyOTkyMiwiZXhwIjoyMDkxMTA1OTIyfQ.A8z-MorFw02VTw_fAsWLPq-T3-BggbdzkPDVSLIZqbg",
-  Hc = "cc-data",
-  Vc = "state.json",
-  yu = async () => {
-    try {
-      const e = await fetch(`${Uc}/storage/v1/object/${Hc}/${Vc}`, {
-        headers: { Authorization: `Bearer ${hi}`, apikey: hi },
-      });
-      return e.ok ? await e.json() : null;
-    } catch {
-      return null;
-    }
-  },
   Bu = (g, I) => {
     const b = (g || []).length,
       fe = (g || []).reduce(($, Q) => $ + (Number(Q.amt) || 0), 0);
     return { count: b, sum: Math.round(fe) };
   },
-  re = Ac(),
-  _ccBoot = (() => {
-    const g = Ar((re == null ? void 0 : re.contacts) || Km);
+  CC_SEED_RAW = {
+    projs: Um,
+    phases: Hm,
+    tasks: Vm,
+    pays: Qm,
+    contacts: Km,
+    msgs: qm,
+    notifs: Jm,
+    docs: Ym,
+    folders: Gm,
+    orders: [],
+    cp: "zfjnvrxmo8rj9ui",
+  },
+  CcBootPayload = (I) => {
+    const b = I || CC_SEED_RAW,
+      fe = Ar(b.contacts || Km);
     return {
-      contacts: g,
-      pays: If(Ru((re == null ? void 0 : re.pays) || Qm, g), g),
+      cp: b.cp || "zfjnvrxmo8rj9ui",
+      projs: Xu(Wu(b.projs || Um)),
+      phases: b.phases || Hm,
+      tasks: b.tasks || Vm,
+      pays: If(Ru(b.pays || Qm, fe), fe),
+      contacts: fe,
+      msgs: b.msgs || qm,
+      notifs: b.notifs || Jm,
+      docs: b.docs || Ym,
+      folders: b.folders || Gm,
+      orders: b.orders || [],
     };
-  })();
+  };
 
 function cg() {
   var v;
@@ -14677,100 +14959,48 @@ function cg() {
     [t, n] = T.useState(!1),
     [r, i] = T.useState(null),
     [o, s] = T.useState("dashboard"),
-    [d, a] = T.useState((re == null ? void 0 : re.cp) || "zfjnvrxmo8rj9ui"),
+    [d, a] = T.useState("zfjnvrxmo8rj9ui"),
     [c, f] = T.useState(!1),
     [x, m] = T.useState(null),
-    [_, k] = T.useState(
-      Xu(Wu((re == null ? void 0 : re.projs) || Um)),
-    ),
-    [y, C] = T.useState((re == null ? void 0 : re.phases) || Hm),
-    [h, p] = T.useState((re == null ? void 0 : re.tasks) || Vm),
-    [j, E] = T.useState(_ccBoot.pays),
-    [M, W] = T.useState(_ccBoot.contacts),
-    [F, B] = T.useState((re == null ? void 0 : re.msgs) || qm),
-    [V, A] = T.useState((re == null ? void 0 : re.notifs) || Jm),
+    [bootReady, setBootReady] = T.useState(!1),
+    [cloudConflict, setCloudConflict] = T.useState(null),
+    [_, k] = T.useState([]),
+    [y, C] = T.useState([]),
+    [h, p] = T.useState([]),
+    [j, E] = T.useState([]),
+    [M, W] = T.useState([]),
+    [F, B] = T.useState([]),
+    [V, A] = T.useState([]),
     [ue] = T.useState([]),
-    [P, z] = T.useState((re == null ? void 0 : re.docs) || Ym),
-    [w, L] = T.useState((re == null ? void 0 : re.folders) || Gm),
-    [ee, te] = T.useState((re == null ? void 0 : re.orders) || []),
-    [$, Q] = T.useState("idle"),
-    q = T.useRef(null),
+    [P, z] = T.useState([]),
+    [w, L] = T.useState([]),
+    [ee, te] = T.useState([]),
+    [$, Q] = T.useState({ status: "loading", localOk: !0, cloudOk: !1 }),
+    uploadQueueRef = T.useRef(null),
+    loadedCloudRevisionRef = T.useRef(null),
+    bootReadyRef = T.useRef(!1),
+    applyCloudRef = T.useRef(null),
     oe = T.useCallback((g) => {
-      const I = { ...g, savedAt: Date.now() },
-        b = JSON.stringify(I),
-        fe = Bu(I.pays),
-        G = Yu(I.pays),
-        ft = Gu("oe() auto-save", I);
-      (console.log("[CC Sync] local save", {
-        paysLen: fe.count,
-        paysSum: fe.sum,
-        jordanPaysLen: G.count,
-        jordanPaysSum: G.sum,
-        setItemOk: ft.ok,
-        verifyOk: ft.verifyOk,
-        bytes: b.length,
-        savedAt: I.savedAt,
-      }),
-        Q("saving"),
-        clearTimeout(q.current),
-        (q.current = setTimeout(() => {
-          const $e = Date.now(),
-            Qe = {
-              ts: $e,
-              tsISO: new Date($e).toISOString(),
-              uploadId: $e,
-              jordanPaysLen: G.count,
-              jordanPaysSum: G.sum,
-              paysLen: fe.count,
-              paysSum: fe.sum,
-              bytes: b.length,
-              savedAt: I.savedAt,
-              setItemOk: ft.ok,
-            };
-          (console.log("[CC Cloud] upload start", Qe),
-            Zu({ phase: "start", ...Qe }),
-            fetch(`${Uc}/storage/v1/object/${Hc}/${Vc}`, {
-              method: "PUT",
-              headers: {
-                Authorization: `Bearer ${hi}`,
-                apikey: hi,
-                "Content-Type": "application/json",
-                "x-upsert": "true",
-              },
-              body: b,
-            })
-              .then(async (ne) => {
-                const Ee = {
-                  ...Qe,
-                  phase: ne.ok ? "success" : "failed",
-                  httpStatus: ne.status,
-                  ok: ne.ok,
-                };
-                ne.ok ||
-                  (Ee.responseBody = await ne.text().catch(() => ""));
-                (ne.ok
-                  ? console.log("[CC Cloud] upload success", Ee)
-                  : console.error("[CC Cloud] upload failed", Ee),
-                  Zu(Ee),
-                  Q(ne.ok ? "saved" : "error"),
-                  setTimeout(
-                    () => Q((Ie) => (Ie === "saved" ? "idle" : Ie)),
-                    3e3,
-                  ));
-              })
-              .catch((ne) => {
-                const Ee = {
-                  ...Qe,
-                  phase: "error",
-                  ok: !1,
-                  httpStatus: null,
-                  error: ne.message || String(ne),
-                };
-                (console.error("[CC Cloud] upload failed", Ee),
-                  Zu(Ee),
-                  Q("error"));
-              }));
-        }, 2e3)));
+      if (!bootReadyRef.current || !uploadQueueRef.current) return;
+      const I = Bu(g.pays),
+        b = Yu(g.pays);
+      uploadQueueRef.current.enqueue(g, (fe) => {
+        const G = Gu("oe() auto-save", fe);
+        return (
+          console.log("[CC Sync] local save", {
+            paysLen: I.count,
+            paysSum: I.sum,
+            jordanPaysLen: b.count,
+            jordanPaysSum: b.sum,
+            setItemOk: G.ok,
+            slimmed: G.slimmed,
+            verifyOk: G.verifyOk,
+            savedAt: fe.savedAt,
+            localError: G.error,
+          }),
+          { ok: G.ok, error: G.error }
+        );
+      });
     }, []),
     [ne, Ee] = T.useState(null),
     [Ie, pt] = T.useState(""),
@@ -14780,6 +15010,121 @@ function cg() {
     [Vt, de] = T.useState(""),
     [mn, Rt] = T.useState("");
   (T.useEffect(() => {
+      bootReadyRef.current = bootReady;
+    }, [bootReady]),
+    T.useEffect(() => {
+      let cancelled = !1,
+        cloudPoll = null;
+      const applyCloud = (Gt) => {
+        const G = CcBootPayload(Gt);
+        (a(G.cp),
+          k(G.projs),
+          C(G.phases),
+          p(G.tasks),
+          E(G.pays),
+          W(G.contacts),
+          B(G.msgs),
+          A(G.notifs),
+          z(G.docs),
+          L(G.folders),
+          te(G.orders),
+          Gu("cloud-reload", {
+            ...G,
+            savedAt: (Gt == null ? void 0 : Gt.savedAt) || Date.now(),
+            cloudRevision: getCloudRevision(Gt),
+          }),
+          (loadedCloudRevisionRef.current = getCloudRevision(Gt)));
+      };
+      applyCloudRef.current = applyCloud;
+      uploadQueueRef.current ||
+        (uploadQueueRef.current = createCloudUploadQueue({
+          onStatusChange: (g, I) => Q({ status: g, ...(I || {}) }),
+          logUpload: (g) => Zu(g),
+          seedReference: CC_SEED_RAW,
+          getLoadedRevision: () => loadedCloudRevisionRef.current,
+          setLoadedRevision: (g) => {
+            loadedCloudRevisionRef.current = g;
+          },
+          onBeforeUpload: (ctx) =>
+            new Promise((resolve) => {
+              setCloudConflict({ ...ctx, resolve });
+            }),
+          onLoadCloud: (g) => {
+            applyCloud(g);
+            m("☁️ נטענו נתונים חדשים מהענן");
+          },
+          onRefreshLocalCache: (g) => {
+            const I = Gu("post-cloud-upload", g);
+            return (
+              console.log("[CC Sync] local cache refreshed from uploaded snapshot", {
+                ok: I.ok,
+                slimmed: I.slimmed,
+                bytes: I.bytes,
+                savedAt: g.savedAt,
+              }),
+              { ok: I.ok, slimmed: I.slimmed, error: I.error }
+            );
+          },
+        }));
+      (async () => {
+        console.log("[CC Sync] boot: fetching cloud first…");
+        const g = await fetchCloudStateFirst(),
+          I = Ac(),
+          fe = g.ok ? g.data : null,
+          {
+            source: b,
+            data: Gt,
+            cloudRevision: qr,
+            staleLocalRejected: St,
+            rejectReason: Lr,
+          } = resolveBootState(fe, I, CC_SEED_RAW, { cloudFetchOk: g.ok }),
+          G = CcBootPayload(Gt);
+        if (cancelled) return;
+        if (!g.ok) {
+          console.error("[CC Sync] boot: cloud fetch failed after retries", g.error);
+          m("Cloud unavailable — using local data. Sync will retry when online.");
+        }
+        (applyCloud(Gt),
+          (loadedCloudRevisionRef.current =
+            g.ok && fe
+              ? getCloudRevision(fe)
+              : g.ok && g.empty
+                ? 0
+                : null),
+          console.log("[CC Sync] boot complete", {
+            source: b,
+            projs: G.projs.length,
+            pays: G.pays.length,
+            cloudOk: g.ok,
+            cloudEmpty: g.empty,
+            loadedCloudRevision: loadedCloudRevisionRef.current,
+            staleLocalRejected: St || false,
+            rejectReason: Lr || null,
+          }),
+          St &&
+            m(
+              `☁️ Loaded cloud — local cache was stale (${Lr || "incomplete vs cloud"}). Load cloud before editing.`,
+            ),
+          b === "cloud" && g.ok && m("☁️ נתונים נטענו מהענן"),
+          uploadQueueRef.current.setCloudReady(g.ok),
+          setBootReady(!0));
+        g.ok ||
+          (cloudPoll = setInterval(async () => {
+            if (cancelled) return;
+            const oe = await fetchStorageJson(CC_STATE_PATH);
+            oe.ok &&
+              (uploadQueueRef.current.setCloudReady(!0),
+              clearInterval(cloudPoll),
+              console.log("[CC Sync] cloud connection restored"));
+          }, 5000));
+      })();
+      return () => {
+        ((cancelled = !0),
+          cloudPoll && clearInterval(cloudPoll),
+          uploadQueueRef.current && uploadQueueRef.current.destroy());
+      };
+    }, []),
+    T.useEffect(() => {
     const g = window.location.hash;
     if (g.startsWith("#clip="))
       try {
@@ -14821,6 +15166,7 @@ function cg() {
       } catch {}
   }, []),
     T.useEffect(() => {
+      if (!bootReady) return;
       oe({
         projs: _,
         phases: y,
@@ -14834,8 +15180,85 @@ function cg() {
         orders: ee,
         cp: d,
       });
-    }, [_, y, h, j, M, F, V, P, w, ee, d, oe]));
-  const Ve = T.useCallback((g) => m(g), []);
+    }, [_, y, h, j, M, F, V, P, w, ee, d, oe, bootReady]));
+  const persistDocumentUpload = T.useCallback(
+    async ({
+      file,
+      doc,
+      scope = "docs",
+      contactId,
+      replaceDocId,
+      patchContact,
+    }) => {
+      if (!uploadQueueRef.current) throw new Error("Sync not ready");
+      const pid = doc.pid || d;
+      const storagePath = documentStoragePath(pid, doc.id, doc.name);
+      const up = await uploadDocumentFile(
+        storagePath,
+        file,
+        file.type || doc.type || "application/octet-stream",
+      );
+      if (!up.ok) {
+        throw new Error(up.body || `File upload failed (${up.status})`);
+      }
+      const savedDoc = {
+        ...doc,
+        pid,
+        storagePath,
+        data: null,
+      };
+      delete savedDoc.contactId;
+
+      let nextDocs = P;
+      let nextContacts = M;
+      if (scope === "docs") {
+        nextDocs = [...P, savedDoc];
+        z(nextDocs);
+      } else if (scope === "contact" && contactId) {
+        nextContacts = M.map((c) => {
+          if (c.id !== contactId) return c;
+          let docs = [...(c.docs || [])];
+          if (replaceDocId && docs.some((x) => x.id === replaceDocId)) {
+            docs = docs.map((x) => (x.id === replaceDocId ? savedDoc : x));
+          } else {
+            docs.push(savedDoc);
+          }
+          let next = { ...c, docs };
+          if (patchContact) next = patchContact(next, savedDoc);
+          return next;
+        });
+        W(nextContacts);
+      }
+
+      await uploadQueueRef.current.enqueueImmediate(
+        {
+          projs: _,
+          phases: y,
+          tasks: h,
+          pays: j,
+          contacts: nextContacts,
+          msgs: F,
+          notifs: V,
+          docs: nextDocs,
+          folders: w,
+          orders: ee,
+          cp: d,
+        },
+        (fe) => {
+          const G = Gu("doc-upload", fe);
+          return { ok: G.ok, error: G.error };
+        },
+      );
+      return savedDoc;
+    },
+    [_, y, h, j, M, F, V, P, w, ee, d],
+  );
+  const Ve = T.useCallback((g) => m(g), []),
+    syncSt = $.status || "idle",
+    resolveCloudConflict = (g) => {
+      cloudConflict &&
+        (cloudConflict.resolve(g), setCloudConflict(null));
+    };
   T.useEffect(() => {
     try {
       const g = JSON.parse(sessionStorage.getItem("cc_ls_write_log") || "[]");
@@ -14851,62 +15274,6 @@ function cg() {
           I,
         );
     } catch {}
-  }, []);
-  T.useEffect(() => {
-    yu().then((g) => {
-      if (!g) {
-        const I = Ac(),
-          b = Bu(I == null ? void 0 : I.pays);
-        return void console.log("[CC Sync] startup: cloud unavailable, keeping local", {
-          localPaysLen: b.count,
-          localPaysSum: b.sum,
-          winner: "local",
-        });
-      }
-      const I = Ac(),
-        b = JSON.stringify(g).length,
-        fe = I ? JSON.stringify(I).length : 0,
-        G = Bu(I == null ? void 0 : I.pays),
-        ft = Bu(g.pays),
-        $ = (I == null ? void 0 : I.savedAt) || 0,
-        Qe = g.savedAt || 0;
-      let oe = !1,
-        ne = "local (default)";
-      Qe > $
-        ? ((oe = !0), (ne = "cloud (newer savedAt)"))
-        : $ > Qe
-          ? (ne = "local (newer savedAt)")
-          : b > fe + 50
-            ? ((oe = !0), (ne = "cloud (legacy size heuristic)"))
-            : (ne = "local (size tie or smaller cloud)");
-      (console.log("[CC Sync] startup compare", {
-        localPaysLen: G.count,
-        cloudPaysLen: ft.count,
-        localPaysSum: G.sum,
-        cloudPaysSum: ft.sum,
-        localJsonBytes: fe,
-        cloudJsonBytes: b,
-        localSavedAt: $,
-        cloudSavedAt: Qe,
-        winner: ne,
-        applyCloud: oe,
-      }),
-        oe &&
-          (k(Xu(Wu(g.projs || []))),
-          C(g.phases || []),
-          p(g.tasks || []),
-          (() => {
-            const Ee = Ar(g.contacts || []);
-            (W(Ee), E(Ru(g.pays || [], Ee)));
-          })(),
-          B(g.msgs || []),
-          A(g.notifs || []),
-          z(g.docs || []),
-          L(g.folders || []),
-          te(g.orders || []),
-          g.cp && a(g.cp),
-          Ve("☁️ נתונים סונכרנו מהענן")));
-    });
   }, []);
   const fr = () => {
       !De ||
@@ -14979,9 +15346,49 @@ function cg() {
         l.jsx("style", { children: os }),
         l.jsx(Xm, {
           onLogin: (g) => {
-            (i(g), Ve(`ברוך הבא ${g.name}!`));
+            (i(g), m(`ברוך הבא ${g.name}!`));
           },
           users: Am,
+        }),
+        !bootReady &&
+          l.jsx("div", {
+            style: {
+              position: "fixed",
+              bottom: 16,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "8px 14px",
+              background: u.card,
+              border: `1px solid ${u.border}`,
+              borderRadius: 8,
+              fontSize: 12,
+              color: u.text2,
+              boxShadow: "0 4px 20px rgba(0,0,0,.08)",
+            },
+            children: "☁️ Loading cloud data…",
+          }),
+      ],
+    });
+  if (!bootReady)
+    return l.jsxs(l.Fragment, {
+      children: [
+        l.jsx("style", { children: os }),
+        l.jsxs("div", {
+          dir: "rtl",
+          style: {
+            minHeight: "100vh",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: u.bg,
+            fontFamily: "'Heebo',sans-serif",
+          },
+          children: [
+            l.jsx("div", {
+              style: { fontSize: 14, color: u.text2 },
+              children: "☁️ Loading your projects from the cloud…",
+            }),
+          ],
         }),
       ],
     });
@@ -15015,6 +15422,7 @@ function cg() {
             showToast: Ve,
             pays: j,
             setPays: E,
+            persistDocumentUpload,
           });
         case "tasks":
           return l.jsx(tg, { tasks: h, setTasks: p, phases: y, cp: d });
@@ -15041,6 +15449,7 @@ function cg() {
             showToast: Ve,
             pays: j,
             setPays: E,
+            persistDocumentUpload,
           });
         case "suppliers":
           return l.jsx(gu, {
@@ -15053,6 +15462,7 @@ function cg() {
             showToast: Ve,
             pays: j,
             setPays: E,
+            persistDocumentUpload,
           });
         case "documents":
           return l.jsx(rg, {
@@ -15061,6 +15471,8 @@ function cg() {
             folders: w,
             setFolders: L,
             cp: d,
+            persistDocumentUpload,
+            showToast: Ve,
           });
         case "orders":
           return l.jsx(sg, {
@@ -15194,22 +15606,37 @@ function cg() {
                         style: {
                           fontSize: 10,
                           color:
-                            $ === "saved"
+                            syncSt === "saved" && $.cloudOk
                               ? u.green
-                              : $ === "saving"
+                              : syncSt === "saving" ||
+                                  syncSt === "pending" ||
+                                  syncSt === "conflict"
                                 ? u.yellow
-                                : $ === "error"
-                                  ? u.red
-                                  : u.text3,
+                                : syncSt === "offline"
+                                  ? u.blue
+                                  : syncSt === "error"
+                                    ? u.red
+                                    : u.text3,
                         },
                         children:
-                          $ === "saving"
-                            ? "☁️ שומר..."
-                            : $ === "saved"
-                              ? "☁️ ✅"
-                              : $ === "error"
-                                ? "☁️ ❌"
-                                : "",
+                          syncSt === "saved" && $.cloudOk
+                            ? "☁️ ✅ נשמר בענן" +
+                              ($.localOk === !1 ? " ⚠️" : "")
+                            : syncSt === "loading"
+                              ? "☁️ טוען..."
+                              : syncSt === "saving"
+                                ? "☁️ שומר..."
+                                : syncSt === "pending"
+                                  ? "☁️ ממתין לשמירה..."
+                                  : syncSt === "offline"
+                                    ? "☁️ ממתין לרשת..."
+                                    : syncSt === "conflict"
+                                      ? "☁️ ⚠️ ענן מעודכן יותר"
+                                      : syncSt === "error"
+                                        ? "☁️ ❌ " +
+                                          (($.cloudError || "שגיאת ענן")
+                                            .slice(0, 36))
+                                        : "",
                       }),
                     ],
                   }),
@@ -15251,7 +15678,8 @@ function cg() {
                 {
                   className: "cc-mobile-main",
                   style: { padding: e ? 8 : 16, maxWidth: e ? "100%" : 1060 },
-                  children: [l.jsx("div", {
+                  children: [
+                    l.jsx("div", {
                       style: { display:"flex", gap:6, marginBottom:10 },
                       children: l.jsxs("div", { style:{display:"flex",gap:4,padding:2,background:"#f0f1f5",borderRadius:8}, children: [
                         l.jsx("button", { onClick:function(){a("p1");}, style:{padding:"6px 14px",background:d==="p1"?"#4f46e5":"transparent",color:d==="p1"?"#fff":"#5f6578",border:"none",borderRadius:6,fontWeight:500,cursor:"pointer",fontSize:11,transition:"all .15s"}, children:"Canton Home Build" }),
@@ -15576,6 +16004,86 @@ function cg() {
               }),
             }),
           x && l.jsx(Wm, { msg: x, onClose: () => m(null) }),
+          cloudConflict &&
+            l.jsx(Fe, {
+              title:
+                cloudConflict.kind === "mass-loss"
+                  ? "⚠️ Dangerous data loss blocked"
+                  : cloudConflict.kind === "seed-blocked"
+                    ? "⚠️ Seed data upload blocked"
+                    : "☁️ Cloud revision conflict",
+              onClose: () => resolveCloudConflict("defer"),
+              w: 520,
+              children: l.jsxs("div", {
+                style: {
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                },
+                children: [
+                  l.jsx("p", {
+                    style: { fontSize: 13, color: u.text2, lineHeight: 1.5 },
+                    children:
+                      cloudConflict.kind === "mass-loss"
+                        ? "This upload would delete a large amount of cloud data. Load the latest cloud state to continue. To restore an older backup, use Cloud Backup History in Settings."
+                        : cloudConflict.kind === "seed-blocked"
+                          ? "Demo/seed data cannot replace real cloud data. Load the cloud version instead."
+                          : "Cloud has advanced since this device loaded. You must load the latest cloud state before saving. There is no overwrite option.",
+                  }),
+                  cloudConflict.reasons &&
+                    cloudConflict.reasons.length > 0 &&
+                    l.jsx("div", {
+                      style: {
+                        fontSize: 12,
+                        color: u.yellow,
+                        padding: 8,
+                        borderRadius: 8,
+                        background: u.yellow + "14",
+                      },
+                      children: cloudConflict.reasons.join(" · "),
+                    }),
+                  l.jsxs("div", {
+                    style: { fontSize: 12, color: u.text3, lineHeight: 1.6 },
+                    children: [
+                      "Cloud: ",
+                      cloudConflict.cloudSummary ||
+                        formatFingerprintSummary(cloudConflict.cloudFp),
+                      l.jsx("br", {}),
+                      "This device: ",
+                      cloudConflict.localSummary ||
+                        formatFingerprintSummary(cloudConflict.localFp),
+                      l.jsx("br", {}),
+                      "Cloud revision: ",
+                      cloudConflict.currentRevision ?? "—",
+                      l.jsx("br", {}),
+                      "Loaded revision: ",
+                      cloudConflict.loadedRevision ?? "—",
+                    ],
+                  }),
+                  l.jsxs("div", {
+                    style: {
+                      display: "flex",
+                      gap: 8,
+                      justifyContent: "flex-end",
+                      flexWrap: "wrap",
+                    },
+                    children: [
+                      l.jsx(H, {
+                        v: "secondary",
+                        onClick: () => resolveCloudConflict("defer"),
+                        children: "Not now",
+                      }),
+                      l.jsx(H, {
+                        v: "primary",
+                        icon: ym,
+                        onClick: () => resolveCloudConflict("load-cloud"),
+                        children: "Load Latest Cloud",
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+            }),
         ],
       }),
     ],

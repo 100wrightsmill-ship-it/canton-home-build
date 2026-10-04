@@ -4,3 +4,10 @@ dist/
 .env
 .env.*
 *.log
+.vercel
+.jul29-restore-payload.json
+.jul29-restore-inject.html
+.jul29-hebrew-repair-inject.html
+.jul29-phase2-inject.html
+.jul29-recovery-inject.html
+.jul29-jordan-electrical-text-patch.html
