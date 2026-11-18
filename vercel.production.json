@@ -1,0 +1,26 @@
+{
+  "buildCommand": "npm run build:vercel:production",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "build": {
+    "env": {
+      "VERCEL_BUILD_PROFILE": "production-db",
+      "VITE_PRODUCTION_DB_MODE": "true",
+      "VITE_PRODUCTION_API_BASE": "/api/production"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/production/:path*",
+      "destination": "/api/production"
+    },
+    {
+      "source": "/api/staging/:path*",
+      "destination": "/api/staging"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+---
+description: Deployment workflow — auto-deploy code-only Production changes; explicit approval for data/infra
+alwaysApply: true
+---
+
+# Deployment workflow
+
+**Do not use Staging by default.** Staging is outdated and creates confusion.
+
+Production URL: **https://canton-home-build.vercel.app**
+
+## Default path (normal UI changes & routine bug fixes)
+
+For UI, layout, buttons, calculations, client-side logic, and regular bug fixes:
+
+1. **Change** the code
+2. **Build/test locally** (`npm run build:vercel:production` or `npm run dev`)
+3. **Deploy code-only to Production automatically** — do not stop to ask for a separate deploy approval
+4. **Report result** (deploy URL, PASS/FAIL verification when relevant)
+
+Use:
+
+```bash
+vercel deploy --prod --local-config vercel.production.json --yes \
+  -b VERCEL_BUILD_PROFILE=production-db \
+  -b VITE_PRODUCTION_DB_MODE=true \
+  -b VITE_PRODUCTION_API_BASE=/api/production
+```
+
+Do **not**:
+- Deploy to Staging Preview for these changes
+- Send Staging URLs unless the user explicitly asked for Staging
+- Run migrations, reconcile scripts, or other data-modifying ops against Production as part of testing
+
+**Summary:** **Change → test → deploy Production → report result.**
+
+## Still requires explicit user approval first
+
+Stop and ask before any of the following:
+
+- Modifying Production **data** (writes, updates, deletes)
+- Deleting or restoring records
+- Migrations or **schema** changes
+- Storage **backfills** or deletions
+- Any **destructive or irreversible** operation
+
+Read-only verification against live Production (drift check, read-back, integrity audit) is OK when requested or as part of post-deploy smoke checks that do not write data.
+
+## When Staging is allowed
+
+Use Staging **only** when the change actually involves:
+
+- Database schema changes
+- Migrations or data migration
+- Reconciliation / cutover pipelines
+- Other high-risk infrastructure work that must be validated off Production
+
+If Staging is used, say why (schema/migration/infra) — not as a default preview step.
+
+## Data safety during deploy
+
+- Routine Production deploys are **code-only** unless the user explicitly requests a data operation.
+- Never modify Production data as part of routine UI or bug-fix testing.

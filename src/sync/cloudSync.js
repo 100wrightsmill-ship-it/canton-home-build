@@ -13,6 +13,8 @@
  * - CloudUploadQueue interface stays; swap uploadFn implementation
  */
 
+import { assertStateJsonWriteAllowed } from "../db/dbModeGuard.js";
+
 export const SYNC_SCHEMA_VERSION = 1;
 
 export const SUPABASE_URL = "https://bdckzzweimrmvcvvahbr.supabase.co";
@@ -103,7 +105,10 @@ export function storageUrl(objectPath) {
 
 export async function fetchStorageJson(objectPath) {
   try {
-    const res = await fetch(storageUrl(objectPath), { headers: authHeaders() });
+    const res = await fetch(storageUrl(objectPath), {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
     if (res.status === 404 || res.status === 400) {
       return { ok: true, empty: true, data: null, status: res.status };
     }
@@ -145,6 +150,9 @@ export async function fetchCloudStateFirst(maxAttempts = 8) {
 }
 
 export async function putStorageJson(objectPath, data) {
+  if (objectPath === STATE_PATH || objectPath.endsWith("/state.json")) {
+    assertStateJsonWriteAllowed(`Storage PUT ${objectPath}`);
+  }
   const body = typeof data === "string" ? data : JSON.stringify(data);
   const res = await fetch(storageUrl(objectPath), {
     method: "PUT",
@@ -312,6 +320,19 @@ export function assessCloudUpload({
   const cloudEmpty = !cloudState || isStorageEmpty(cloudState);
   const currentRevision = getCloudRevision(cloudState);
 
+  if (loadedRevision == null && !cloudEmpty) {
+    return {
+      allowed: false,
+      kind: "revision-not-loaded",
+      reasons: ["cloud revision was not loaded — load cloud before saving"],
+      cloud: cloudState,
+      cloudFp,
+      localFp,
+      loadedRevision,
+      currentRevision,
+    };
+  }
+
   if (
     !cloudEmpty &&
     seedRef &&
@@ -322,19 +343,6 @@ export function assessCloudUpload({
       allowed: false,
       kind: "seed-blocked",
       reasons: ["seed data cannot replace real cloud data"],
-      cloud: cloudState,
-      cloudFp,
-      localFp,
-      loadedRevision,
-      currentRevision,
-    };
-  }
-
-  if (loadedRevision == null && !cloudEmpty) {
-    return {
-      allowed: false,
-      kind: "revision-not-loaded",
-      reasons: ["cloud revision was not loaded — load cloud before saving"],
       cloud: cloudState,
       cloudFp,
       localFp,
@@ -386,15 +394,72 @@ export function assessCloudUpload({
   };
 }
 
+/** Minimal empty shell when cloud is unreachable and there is no local cache. Never seed. */
+export function emptyBootShell(seedRef) {
+  return {
+    cp: seedRef?.cp || "zfjnvrxmo8rj9ui",
+    projs: [],
+    phases: [],
+    tasks: [],
+    pays: [],
+    contacts: [],
+    msgs: [],
+    notifs: [],
+    docs: [],
+    folders: [],
+    orders: [],
+  };
+}
+
+/** Upload blocks that require an explicit user choice — must not auto-retry. */
+export const USER_CONFLICT_KINDS = new Set([
+  "revision-stale",
+  "revision-not-loaded",
+  "seed-blocked",
+  "mass-loss",
+]);
+
+export function isUserConflictKind(kind) {
+  return USER_CONFLICT_KINDS.has(kind);
+}
+
+/**
+ * Keep the user's current project when reloading cloud if it still exists.
+ * Falls back to cloud/default cp only when the current selection is missing.
+ */
+export function resolveActiveProject(currentCp, projs, fallbackCp) {
+  const list = Array.isArray(projs) ? projs : [];
+  const exists = (id) => id && list.some((p) => p && p.id === id);
+  if (exists(currentCp)) return currentCp;
+  if (exists(fallbackCp)) return fallbackCp;
+  return list[0]?.id || fallbackCp || "p1";
+}
+
+export function formatOfflineSavedAt(savedAtMs) {
+  if (!savedAtMs) return "unknown date";
+  try {
+    return new Date(savedAtMs).toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return "unknown date";
+  }
+}
+
 /**
  * Boot: when cloud fetch succeeded and cloud has data, always load cloud.
  * Local cache is never preferred over reachable cloud (savedAt is not used).
+ * When cloud fetch fails, never treat seed or unverified local as authoritative cloud.
  */
 export function resolveBootState(cloud, local, seed, { cloudFetchOk = true } = {}) {
   const cloudHas = cloud && Array.isArray(cloud.projs) && cloud.projs.length > 0;
   const localHas = local && Array.isArray(local.projs) && local.projs.length > 0;
 
-  if (cloudHas && cloudFetchOk) {
+  if (cloudFetchOk && cloudHas) {
     const cloudFp = stateFingerprint(cloud);
     const localFp = localHas ? stateFingerprint(local) : null;
     const seedLike = localHas && seed && isSeedLikeState(local, seed);
@@ -406,6 +471,7 @@ export function resolveBootState(cloud, local, seed, { cloudFetchOk = true } = {
       source: "cloud",
       data: cloud,
       cloudRevision: getCloudRevision(cloud),
+      offline: false,
       staleLocalRejected: staleLocal,
       rejectReason: staleLocal
         ? seedLike
@@ -415,12 +481,52 @@ export function resolveBootState(cloud, local, seed, { cloudFetchOk = true } = {
     };
   }
 
-  if (cloudHas) return { source: "cloud", data: cloud, cloudRevision: getCloudRevision(cloud) };
-  if (localHas) return { source: "local", data: local, cloudRevision: getCloudRevision(local) };
-  if (isStorageEmpty(cloud) && isStorageEmpty(local)) {
-    return { source: "seed", data: seed, cloudRevision: 0 };
+  if (cloudFetchOk && !cloudHas) {
+    if (localHas) {
+      return {
+        source: "local",
+        data: local,
+        cloudRevision: 0,
+        offline: false,
+      };
+    }
+    return { source: "seed", data: seed, cloudRevision: 0, offline: false };
   }
-  return { source: "seed", data: seed, cloudRevision: 0 };
+
+  if (!cloudFetchOk) {
+    if (localHas) {
+      const seedLike = seed && isSeedLikeState(local, seed);
+      return {
+        source: "local-offline",
+        data: local,
+        cloudRevision: null,
+        offline: true,
+        offlineSavedAt: local.savedAt || 0,
+        staleLocal: seedLike,
+        rejectReason: seedLike
+          ? "local cache matches seed/demo counts — not verified against cloud"
+          : "cloud unavailable — local copy not verified",
+      };
+    }
+    return {
+      source: "empty-offline",
+      data: emptyBootShell(seed),
+      cloudRevision: null,
+      offline: true,
+      offlineSavedAt: 0,
+      rejectReason: "cloud unavailable — no local cache",
+    };
+  }
+
+  if (localHas) {
+    return {
+      source: "local",
+      data: local,
+      cloudRevision: getCloudRevision(local),
+      offline: false,
+    };
+  }
+  return { source: "seed", data: seed, cloudRevision: 0, offline: false };
 }
 
 export function backupObjectPathForState(stateData) {
@@ -519,6 +625,18 @@ export function writeLocalState(source, data) {
   }
 }
 
+/** cloudRevision is cloud-only metadata — never persist in localStorage cache. */
+export function stripCloudRevisionFromLocalCache(state) {
+  if (!state || typeof state !== "object") return state;
+  const { cloudRevision: _drop, ...rest } = state;
+  return rest;
+}
+
+/** Revision token from a cloud fetch only — never cloudRevision + 1. */
+export function loadedRevisionFromCloud(cloudState) {
+  return getCloudRevision(cloudState);
+}
+
 /** Strip embedded file blobs before localStorage (mobile quota ~5MB). */
 export function slimLocalSnapshot(state) {
   if (!state || typeof state !== "object") return state;
@@ -548,7 +666,7 @@ export function slimLocalSnapshot(state) {
  * Tries full payload first, then slim if quota exceeded.
  */
 export function writeLocalCacheSnapshot(state) {
-  const parsed =
+  let parsed =
     typeof state === "string"
       ? (() => {
           try {
@@ -567,6 +685,7 @@ export function writeLocalCacheSnapshot(state) {
       fullBytes: 0,
     };
   }
+  parsed = stripCloudRevisionFromLocalCache(parsed);
   const fullBytes = JSON.stringify(parsed).length;
   let ok = true;
   let slimmed = false;
@@ -635,14 +754,48 @@ export function createCloudUploadQueue({
     if (!cloudReady || !pendingPayload || inFlight) return;
 
     if (!online) {
-      setStatus("offline", { localOk: lastLocalOk, cloudOk: false });
+      setStatus("offline", {
+        localOk: lastLocalOk,
+        cloudOk: false,
+        cloudRevisionUnknown: getLoadedRevision?.() == null,
+      });
       scheduleRetry();
       return;
     }
 
     inFlight = true;
+    let blockedUserConflict = false;
     const payload = pendingPayload;
     const loadedRevision = getLoadedRevision?.();
+
+    if (loadedRevision == null) {
+      const probe = await fetchStorageJson(STATE_PATH);
+      const probeHas =
+        probe.ok &&
+        probe.data &&
+        Array.isArray(probe.data.projs) &&
+        probe.data.projs.length > 0;
+      if (probeHas || !probe.ok) {
+        logUpload?.({
+          phase: "blocked",
+          ok: false,
+          kind: "revision-not-loaded",
+          reasons: [
+            probe.ok
+              ? "cloud revision unknown — load cloud before upload"
+              : "cloud unavailable — upload deferred",
+          ],
+        });
+        setStatus("offline", {
+          localOk: lastLocalOk,
+          cloudOk: false,
+          cloudRevisionUnknown: true,
+        });
+        inFlight = false;
+        scheduleRetry();
+        return;
+      }
+    }
 
     const cloudRes = await fetchStorageJson(STATE_PATH);
     const cloudState = cloudRes.ok ? cloudRes.data : null;
@@ -655,6 +808,9 @@ export function createCloudUploadQueue({
     });
 
     if (!assessment.allowed) {
+      if (isUserConflictKind(assessment.kind)) {
+        blockedUserConflict = true;
+      }
       logUpload?.({
         phase: "blocked",
         ok: false,
@@ -696,17 +852,14 @@ export function createCloudUploadQueue({
             return;
           }
           inFlight = false;
-          scheduleRetry();
           return;
         } catch {
           inFlight = false;
-          scheduleRetry();
           return;
         }
       }
 
       inFlight = false;
-      scheduleRetry();
       return;
     }
 
@@ -809,7 +962,9 @@ export function createCloudUploadQueue({
       scheduleRetry();
     } finally {
       inFlight = false;
-      if (pendingPayload && !inFlight) scheduleRetry();
+      if (pendingPayload && !inFlight && !blockedUserConflict) {
+        scheduleRetry();
+      }
     }
   };
 
@@ -839,10 +994,24 @@ export function createCloudUploadQueue({
 
   const setCloudReady = (ready) => {
     cloudReady = ready;
-    if (ready && pendingPayload) {
+    if (ready && pendingPayload && getLoadedRevision?.() != null) {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => flush(), 100);
     }
+  };
+
+  /** After cloud reconnect: apply cloud snapshot, set revision, allow uploads. */
+  const reconnectCloud = (cloudData) => {
+    const rev = getCloudRevision(cloudData);
+    setLoadedRevision?.(rev);
+    cloudReady = true;
+    retryCount = 0;
+    clearTimeout(retryTimer);
+    if (pendingPayload) {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => flush(), 100);
+    }
+    return rev;
   };
 
   const forceUpload = () => {
@@ -891,6 +1060,7 @@ export function createCloudUploadQueue({
     enqueue,
     enqueueImmediate,
     setCloudReady,
+    reconnectCloud,
     flush,
     forceUpload,
     destroy: () => {

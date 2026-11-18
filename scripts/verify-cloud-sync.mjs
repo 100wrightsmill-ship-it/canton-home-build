@@ -4,6 +4,8 @@
  */
 import {
   resolveBootState,
+  emptyBootShell,
+  formatOfflineSavedAt,
   packStateSnapshot,
   slimLocalSnapshot,
   prepareCloudSnapshot,
@@ -19,6 +21,11 @@ import {
   isRevisionStale,
   fingerprintSignature,
   formatFingerprintSummary,
+  resolveActiveProject,
+  isUserConflictKind,
+  USER_CONFLICT_KINDS,
+  loadedRevisionFromCloud,
+  stripCloudRevisionFromLocalCache,
 } from "../src/sync/cloudSync.js";
 
 let passed = 0;
@@ -95,12 +102,25 @@ console.log("resolveBootState — cloud-first, savedAt ignored");
   assert(r.staleLocalRejected === true, "flags stale local cache");
 }
 {
-  const r = resolveBootState(richCloud, staleLocal, seed, { cloudFetchOk: false });
-  assert(r.source === "cloud", "cloud data still used when present offline");
+  const r = resolveBootState(null, staleLocal, seed, { cloudFetchOk: false });
+  assert(r.source === "local-offline", "cloud fetch fail → local-offline, not seed");
+  assert(r.cloudRevision === null, "revision unknown when offline");
+  assert(r.offline === true, "marked offline");
+  assert(r.staleLocal === true, "stale seed-like local flagged");
 }
 {
-  const r = resolveBootState(null, null, seed);
-  assert(r.source === "seed", "empty cloud and local → seed");
+  const r = resolveBootState(null, null, seed, { cloudFetchOk: false });
+  assert(r.source === "empty-offline", "cloud fetch fail + no local → empty, not seed");
+  assert(r.data.projs.length === 0, "empty shell has no projects");
+}
+{
+  const r = resolveBootState(null, null, seed, { cloudFetchOk: true });
+  assert(r.source === "seed", "confirmed empty cloud and local → seed");
+}
+{
+  const shell = emptyBootShell(seed);
+  assert(shell.projs.length === 0 && shell.cp, "empty boot shell");
+  assert(formatOfflineSavedAt(1785428355986).includes("202"), "formats offline date");
 }
 
 console.log("assessCloudUpload — revision stale blocks write");
@@ -186,6 +206,42 @@ console.log("packStateSnapshot strips stale cloudRevision from payload");
   const packed = packStateSnapshot({ projs: [], cp: "x", cloudRevision: 99 });
   assert(packed.cloudRevision === undefined, "does not copy old cloudRevision");
   assert(typeof packed.savedAt === "number", "sets savedAt for display only");
+}
+
+console.log("resolveActiveProject — preserve UI project on cloud reload");
+{
+  const projs = [
+    { id: "p1", name: "Canton" },
+    { id: "zfjnvrxmo8rj9ui", name: "Jordan" },
+  ];
+  assert(
+    resolveActiveProject("zfjnvrxmo8rj9ui", projs, "p1") === "zfjnvrxmo8rj9ui",
+    "Jordan stays selected when cloud cp is p1",
+  );
+  assert(
+    resolveActiveProject("p1", projs, "p1") === "p1",
+    "Canton stays when already on Canton",
+  );
+  assert(
+    resolveActiveProject("deleted-id", projs, "p1") === "p1",
+    "falls back to cloud cp when current missing",
+  );
+}
+
+console.log("loadedRevisionFromCloud — exact cloud rev, never +1");
+{
+  assert(loadedRevisionFromCloud({ cloudRevision: 5 }) === 5, "exact 5");
+  assert(loadedRevisionFromCloud({ cloudRevision: 5 }) !== 6, "never pre-increment");
+  const stripped = stripCloudRevisionFromLocalCache({ cloudRevision: 6, projs: [] });
+  assert(stripped.cloudRevision === undefined, "local cache strips cloudRevision");
+}
+
+console.log("USER_CONFLICT_KINDS — defer must not auto-retry");
+{
+  assert(isUserConflictKind("revision-stale"), "revision-stale is user conflict");
+  assert(isUserConflictKind("seed-blocked"), "seed-blocked is user conflict");
+  assert(!isUserConflictKind("network"), "network is not user conflict");
+  assert(USER_CONFLICT_KINDS.size === 4, "four user conflict kinds");
 }
 
 console.log("helpers");

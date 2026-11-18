@@ -1,0 +1,26 @@
+{
+  "buildCommand": "npm run build:vercel:staging",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "build": {
+    "env": {
+      "VERCEL_BUILD_PROFILE": "staging-db",
+      "VITE_STAGING_DB_MODE": "true",
+      "VITE_STAGING_API_BASE": "/api/staging"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/staging/:path*",
+      "destination": "/api/staging"
+    },
+    {
+      "source": "/api/production/:path*",
+      "destination": "/api/production"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

@@ -15,6 +15,29 @@ git fetch origin tag v1.0.1-stable-baseline
 git checkout v1.0.1-stable-baseline
 ```
 
+## Development base (required)
+
+**All new work must start from the stable baseline**, not from legacy GitHub `main`.
+
+| Source | Status |
+|--------|--------|
+| Branch `stable/v1.0.1-baseline` | **Canonical** — use this |
+| Tag `v1.0.1-stable-baseline` | **Canonical** — same commit as branch tip |
+| GitHub `main` | **Legacy** — unrelated old history (`0fb745f`…); do **not** branch from it |
+
+Before starting any feature, fix, or refactor:
+
+```bash
+git fetch origin
+git checkout stable/v1.0.1-baseline   # or: git checkout v1.0.1-stable-baseline
+git pull origin stable/v1.0.1-baseline
+git checkout -b feature/your-change
+```
+
+When opening PRs on GitHub, set the **base branch** to `stable/v1.0.1-baseline` (repo default). Never target legacy `main` unless it has been explicitly merged forward by the user.
+
+Local checkout: this workspace `main` tracks `origin/stable/v1.0.1-baseline` at `b11ecee` or later.
+
 ## Data safety (required)
 
 - **Never delete or overwrite existing project/user data** (localStorage `cc_data_v1`, Supabase cloud state, seed migrations, repair passes) **without explicit user approval**.

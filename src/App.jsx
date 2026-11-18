@@ -18,6 +18,7 @@ import {
   fetchStorageJson,
   fetchCloudStateFirst,
   resolveBootState,
+  formatOfflineSavedAt,
   writeLocalCacheSnapshot,
   uploadDocumentFile,
   fetchDocumentBlob,
@@ -28,7 +29,152 @@ import {
   fetchCloudBackup,
   restoreCloudBackup,
   getCloudRevision,
+  loadedRevisionFromCloud,
+  fingerprintSignature,
+  resolveActiveProject,
 } from "./sync/cloudSync.js";
+import { documentStoragePathCandidates, isLegacyInlineDoc } from "./sync/documentPaths.js";
+import { isStagingDbMode, isAnyDbMode } from "./staging/isStagingMode.js";
+import { isProductionDbMode } from "./production/isProductionMode.js";
+import {
+  stagingFetchState,
+  stagingApplyDelta,
+  stagingSnapshot,
+} from "./staging/stagingApiClient.js";
+import {
+  productionFetchState,
+  productionApplyDelta,
+  productionSnapshot,
+} from "./production/productionApiClient.js";
+import {
+  stagingUploadDocumentFile,
+  stagingFetchDocumentBlob,
+} from "./staging/stagingStorage.js";
+import {
+  productionUploadDocumentFile,
+  productionFetchDocumentBlob,
+  productionResolveDocumentPath,
+} from "./production/productionStorage.js";
+import { uiDate, uiDateTime, uiInputDate } from "./staging/stagingFormat.js";
+import { createDbPersistQueue } from "./db/dbPersistQueue.js";
+
+function isDbMode() {
+  return isAnyDbMode();
+}
+async function dbFetchState() {
+  return isProductionDbMode() ? productionFetchState() : stagingFetchState();
+}
+async function dbApplyDelta(before, after) {
+  return isProductionDbMode()
+    ? productionApplyDelta(before, after)
+    : stagingApplyDelta(before, after);
+}
+function dbSnapshot(state) {
+  return isProductionDbMode() ? productionSnapshot(state) : stagingSnapshot(state);
+}
+
+async function ccFetchDocumentBlob(storagePath, docHint, fallbackPid) {
+  if (isProductionDbMode())
+    return productionFetchDocumentBlob(storagePath, docHint, fallbackPid);
+  if (isStagingDbMode()) return stagingFetchDocumentBlob(storagePath);
+  return fetchDocumentBlob(storagePath);
+}
+async function ccUploadDocumentFile(storagePath, fileOrBlob, contentType) {
+  if (isProductionDbMode()) return productionUploadDocumentFile(storagePath, fileOrBlob, contentType);
+  if (isStagingDbMode()) return stagingUploadDocumentFile(storagePath, fileOrBlob, contentType);
+  return uploadDocumentFile(storagePath, fileOrBlob, contentType);
+}
+
+function docMimeType(doc) {
+  const t = (doc?.type || "").trim();
+  if (t) return t;
+  const n = (doc?.name || "").toLowerCase();
+  if (n.endsWith(".pdf")) return "application/pdf";
+  if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".gif")) return "image/gif";
+  if (n.endsWith(".webp")) return "image/webp";
+  if (/\.(jpe?g|bmp|heic|heif)$/.test(n)) return "image/jpeg";
+  return "application/octet-stream";
+}
+
+const CC_AUTOBACKUP_KEY = "cc_data_v1_autobackup";
+const CC_PRODUCTION_CACHE_KEY = "cc_production_readonly_v1";
+
+function findLegacyDocInLocalStorage(docId) {
+  if (!docId || typeof localStorage === "undefined") return null;
+  for (const key of [CC_LOCAL_KEY, CC_AUTOBACKUP_KEY, CC_PRODUCTION_CACHE_KEY]) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      const state = parsed?.state && parsed.projs == null ? parsed.state : parsed;
+      const pools = [
+        ...(state?.docs || []),
+        ...(state?.contacts || []).flatMap((c) => c?.docs || []),
+      ];
+      const hit = pools.find((d) => d?.id === docId);
+      if (hit && (hit.data || hit.storagePath)) return hit;
+    } catch {}
+  }
+  return null;
+}
+
+function resolveDocStoragePath(doc, fallbackPid) {
+  const candidates = documentStoragePathCandidates(doc, fallbackPid);
+  return candidates[0] || null;
+}
+
+async function resolveDocAccess(doc, fallbackPid) {
+  if (!doc || typeof doc !== "object") return null;
+  if (doc.data) return { data: doc.data };
+  if (doc.storagePath) return { storagePath: doc.storagePath };
+
+  const local = findLegacyDocInLocalStorage(doc.id);
+  if (local?.data) return { data: local.data, storagePath: local.storagePath || null };
+  if (local?.storagePath) return { storagePath: local.storagePath };
+
+  if (isProductionDbMode() && doc.id) {
+    const resolved = await productionResolveDocumentPath(
+      { ...doc, pid: doc.pid || fallbackPid },
+      fallbackPid,
+    );
+    if (resolved.ok && resolved.path) return { storagePath: resolved.path };
+    // Legacy inline docs were never uploaded — do not guess paths that 404.
+    if (isLegacyInlineDoc(doc)) return null;
+    return null;
+  }
+
+  const guessed = resolveDocStoragePath(doc, fallbackPid);
+  if (isLegacyInlineDoc(doc)) return null;
+  return guessed ? { storagePath: guessed } : null;
+}
+
+function docCanView(doc, fallbackPid) {
+  if (!doc || typeof doc !== "object") return false;
+  if (doc.data) return true;
+  if (doc.storagePath) return true;
+  if (findLegacyDocInLocalStorage(doc.id)?.data) return true;
+  if (doc.id && doc.name) return true;
+  return false;
+}
+
+function docForViewer(doc, fallbackPid) {
+  if (!doc || typeof doc !== "object") return doc;
+  const local = findLegacyDocInLocalStorage(doc.id);
+  let next = {
+    ...doc,
+    pid: doc.pid || fallbackPid || (Array.isArray(doc.pids) ? doc.pids[0] : null) || "p1",
+  };
+  if (local?.data && !next.data) next = { ...next, data: local.data };
+  const confirmedPath = next.storagePath || local?.storagePath || "";
+  if (confirmedPath && next.storagePath !== confirmedPath) {
+    next = { ...next, storagePath: confirmedPath };
+  } else if (!confirmedPath && !isLegacyInlineDoc(next)) {
+    const guessed = resolveDocStoragePath(next, fallbackPid);
+    if (guessed) next = { ...next, storagePath: guessed };
+  }
+  return next;
+}
 
 const Ih=ArrowDown,Nh=ArrowLeft,Th=ArrowUp,ta=Bell,Dc=Building2;
 const Lh=Calendar,Fh=Camera,Wh=ChartColumn,ts=Check;
@@ -886,6 +1032,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       }),
     );
   },
+  Qu = (I, b, fe, G, ft) => {
+    const $ = (ft || []).find((Q) => Q.id === fe),
+      q = ($ == null ? void 0 : $.pmts || []).find((Q) => Q.id === G);
+    if (!$ || !q) return;
+    (I((Q) =>
+      Q.map((oe) =>
+        oe.id !== fe
+          ? oe
+          : { ...oe, pmts: (oe.pmts || []).filter((X) => X.id !== G) },
+      ),
+    ),
+      Uu(b, fe, G, $, q));
+  },
   Ru = (I, b) => {
     let fe = [...(I || [])];
     const G = new Set();
@@ -1073,7 +1232,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     sh: "0 1px 3px rgba(0,0,0,.06)",
   },
   os =
-    "@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');*{margin:0;padding:0;box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#ccd0d9;border-radius:3px}input,textarea,select,button{font-family:'Heebo',sans-serif}@keyframes fi{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}@keyframes si{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}@media(max-width:767px){html,body{overflow-x:hidden!important;width:100%!important;direction:rtl}*{text-align:right}main{padding:0!important;width:100%!important}.cc-mobile-main{padding:8px!important;width:100%!important;box-sizing:border-box}table{display:block;overflow-x:auto;max-width:calc(100vw - 16px)}input,textarea,select{text-align:right;direction:rtl}}",
+    "@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');*{margin:0;padding:0;box-sizing:border-box}::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#ccd0d9;border-radius:3px}input,textarea,select,button{font-family:'Heebo',sans-serif}@keyframes fi{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}@keyframes si{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}.cc-pmt-card{width:100%;box-sizing:border-box}.cc-mobile-fab{right:16px!important;left:auto!important;bottom:max(16px,env(safe-area-inset-bottom))!important;width:48px!important;height:48px!important;font-size:18px!important}.cc-doc-viewer{position:fixed;inset:0;z-index:1100;width:100vw;max-width:100vw;height:100dvh;height:100vh;max-height:100dvh;max-height:100vh;background:rgba(0,0,0,.85);display:flex;flex-direction:column;overflow:hidden;box-sizing:border-box}.cc-doc-viewer-close{position:fixed;top:max(8px,env(safe-area-inset-top));left:max(8px,env(safe-area-inset-left));z-index:1102;width:44px;height:44px;min-width:44px;padding:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.2);border:none;border-radius:8px;color:#fff;font-size:18px;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}.cc-doc-viewer-toolbar{flex-shrink:0;display:flex;align-items:center;gap:8px;padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px calc(max(8px,env(safe-area-inset-left)) + 52px);background:rgba(0,0,0,.5);min-height:0;box-sizing:border-box;max-width:100vw}.cc-doc-viewer-title{flex:1;min-width:0;display:flex;align-items:center;gap:6px;overflow:hidden}.cc-doc-viewer-icon{flex-shrink:0;font-size:14px}.cc-doc-viewer-name{color:#fff;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}.cc-doc-viewer-meta{color:#999;font-size:10px;white-space:nowrap;flex-shrink:0}.cc-doc-viewer-actions{display:flex;gap:4px;flex-shrink:0;align-items:center}.cc-doc-viewer-action-btn{display:flex;align-items:center;gap:4px;padding:6px 8px;min-height:36px;background:rgba(255,255,255,.1);border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:11px;white-space:nowrap;touch-action:manipulation;-webkit-tap-highlight-color:transparent}.cc-doc-viewer-body{flex:1;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch;display:flex;align-items:center;justify-content:center;padding:12px;padding-bottom:max(12px,env(safe-area-inset-bottom));box-sizing:border-box;width:100%;max-width:100vw}.cc-doc-viewer-body img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;border-radius:8px;box-shadow:0 4px 32px rgba(0,0,0,.5)}.cc-doc-viewer-pdf-wrap{width:100%;height:100%;max-width:100%;max-height:100%;display:flex;flex-direction:column;align-items:stretch;gap:8px;min-height:0}.cc-doc-viewer-pdf-open{flex-shrink:0;align-self:center;padding:8px 14px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px}.cc-doc-viewer-pdf-frame,.cc-doc-viewer-body iframe,.cc-doc-viewer-body embed{flex:1;width:100%;max-width:100%;height:100%;min-height:0;border:none;border-radius:8px;background:#fff;box-shadow:0 4px 32px rgba(0,0,0,.5)}@media(max-width:767px){html,body{overflow-x:hidden!important;width:100%!important;direction:rtl}*{text-align:right}main{padding:0!important;width:100%!important}.cc-mobile-main{padding:8px!important;width:100%!important;box-sizing:border-box;overflow-x:hidden!important}table.cc-desktop-only{display:none!important}table{display:block;overflow-x:auto;max-width:100%}input,textarea,select{text-align:right;direction:rtl}.cc-modal-scroll{padding-bottom:max(16px,env(safe-area-inset-bottom))!important}.cc-doc-viewer-meta{display:none!important}.cc-doc-viewer-action-label{display:none!important}.cc-doc-viewer-action-btn{padding:8px!important;min-width:36px!important;justify-content:center!important}.cc-doc-viewer-toolbar{flex-wrap:wrap;padding-bottom:6px!important}.cc-doc-viewer-title{flex:1 1 calc(100% - 52px)!important}.cc-doc-viewer-actions{flex:1 1 100%!important;justify-content:flex-end!important}.cc-doc-viewer-name{font-size:12px!important}}",
   Lt = {
     complete: { i: "✅", c: "#16a34a", l: "הושלם" },
     in_progress: { i: "🔄", c: "#2563eb", l: "בביצוע" },
@@ -1142,13 +1301,14 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             ? "📘"
             : "📄"
       : "📄",
-  pu = async (e) => {
-    var t;
-    if (e.storagePath) {
+  pu = async (e, t) => {
+    var n;
+    const r = await resolveDocAccess(e, t);
+    if (r?.storagePath) {
       try {
-        const n = await fetchDocumentBlob(e.storagePath);
-        if (!n.ok || !n.blob) return;
-        const a = URL.createObjectURL(n.blob),
+        const i = await ccFetchDocumentBlob(r.storagePath, e, t);
+        if (!i.ok || !i.blob) return;
+        const a = URL.createObjectURL(i.blob),
           c = document.createElement("a");
         ((c.href = a),
           (c.download = e.name),
@@ -1160,24 +1320,25 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       } catch {}
       return;
     }
-    if (e.data)
+    const o = r?.data || e.data;
+    if (o)
       try {
-        const n = e.data.split(","),
-          r =
-            ((t = n[0].match(/:(.*?);/)) == null ? void 0 : t[1]) ||
+        const i = o.split(","),
+          s =
+            ((n = i[0].match(/:(.*?);/)) == null ? void 0 : n[1]) ||
             "application/octet-stream",
-          i = atob(n[1]),
-          o = new Uint8Array(i.length);
-        for (let s = 0; s < i.length; s++) o[s] = i.charCodeAt(s);
-        const d = new Blob([o], { type: r }),
-          a = URL.createObjectURL(d),
-          c = document.createElement("a");
-        ((c.href = a),
-          (c.download = e.name),
-          document.body.appendChild(c),
-          c.click(),
+          d = atob(i[1]),
+          f = new Uint8Array(d.length);
+        for (let _ = 0; _ < d.length; _++) f[_] = d.charCodeAt(_);
+        const a = new Blob([f], { type: s }),
+          c = URL.createObjectURL(a),
+          x = document.createElement("a");
+        ((x.href = c),
+          (x.download = e.name),
+          document.body.appendChild(x),
+          x.click(),
           setTimeout(() => {
-            (document.body.removeChild(c), URL.revokeObjectURL(a));
+            (document.body.removeChild(x), URL.revokeObjectURL(c));
           }, 300));
       } catch {}
   },
@@ -1419,13 +1580,16 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           animation: "si .15s",
           boxShadow: i ? "none" : "0 8px 32px rgba(0,0,0,.12)",
         },
+        className: i ? "cc-modal-scroll" : "",
         children: [
           l.jsxs("div", {
             style: {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              padding: "12px 16px",
+              padding: i
+                ? "max(12px,env(safe-area-inset-top)) 16px 12px"
+                : "12px 16px",
               borderBottom: `1px solid ${u.border}`,
               position: "sticky",
               top: 0,
@@ -1532,6 +1696,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         borderRadius: 8,
         marginBottom: 12,
         overflowX: "auto",
+        WebkitOverflowScrolling: "touch",
+        maxWidth: "100%",
       },
       children: e.map((r) =>
         l.jsx(
@@ -1812,38 +1978,48 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     }
   },
   hu = ({ doc: e, onClose: t }) => {
-    var d, a;
-    const n = (d = e.type) == null ? void 0 : d.startsWith("image/"),
-      r =
-        ((a = e.type) == null ? void 0 : a.includes("pdf")) ||
-        /\.pdf$/i.test(e.name || ""),
+    const mime = docMimeType(e),
+      n = mime.startsWith("image/"),
+      r = mime.includes("pdf") || /\.pdf$/i.test(e.name || ""),
       [c, f] = T.useState(null),
       [_, k] = T.useState(!1),
-      y = !!(e.data || e.storagePath);
+      [loadErr, setLoadErr] = T.useState(""),
+      y = docCanView(e, e.pid),
+      mobilePdf =
+        typeof navigator !== "undefined" &&
+        /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
     T.useEffect(() => {
       let C = null,
         h = !1;
       const p = async () => {
-        if (e.data) {
+        setLoadErr("");
+        k(!0);
+        f(null);
+        const access = await resolveDocAccess(e, e.pid);
+        if (h) return;
+        if (access?.data) {
           if (r) {
-            const j = vu(e.data, "application/pdf");
+            const j = vu(access.data, "application/pdf");
             ((C = j), f(j));
-          } else n ? f(e.data) : f(null);
+          } else n ? f(access.data) : f(null);
           k(!1);
           return;
         }
-        if (e.storagePath) {
-          k(!0);
-          const j = await fetchDocumentBlob(e.storagePath);
+        if (access?.storagePath) {
+          const j = await ccFetchDocumentBlob(access.storagePath, e, e.pid);
           if (h) return;
           if (j.ok && j.blob) {
             const E = URL.createObjectURL(j.blob);
             ((C = E), f(E));
-          } else f(null);
+          } else {
+            f(null);
+            setLoadErr(j.error || "לא ניתן לטעון את המסמך");
+          }
           k(!1);
           return;
         }
         f(null);
+        setLoadErr("לא נמצא קובץ במאגר — ייתכן שנדרשת העלאה מחדש");
         k(!1);
       };
       return (
@@ -1852,7 +2028,17 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ((h = !0), C && URL.revokeObjectURL(C));
         }
       );
-    }, [e.id, e.data, e.storagePath, n, r]);
+    }, [e.id, e.data, e.storagePath, e.pid, e.name, n, r]);
+    T.useEffect(() => {
+      const prevBody = document.body.style.overflow;
+      const prevHtml = document.documentElement.style.overflow;
+      document.body.style.overflow = "hidden";
+      document.documentElement.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prevBody;
+        document.documentElement.style.overflow = prevHtml;
+      };
+    }, []);
     const i = () => {
         try {
           if (r && c) {
@@ -1869,7 +2055,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           if (!x) return;
           (n
             ? x.document.write(
-                `<html><head><title>${e.name}</title></head><body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5"><img src="${e.data}" style="max-width:100%;max-height:100vh"/></body></html>`,
+                `<html><head><title>${e.name}</title></head><body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f5f5f5"><img src="${c || e.data}" style="max-width:100%;max-height:100vh"/></body></html>`,
               )
             : x.document.write(
                 `<html><head><title>${e.name}</title></head><body style="margin:40px;font-family:sans-serif"><h1>${e.name}</h1><p>Type: ${e.type}</p><p>Size: ${tr(e.size)}</p><p>Uploaded: ${e.uploadDate}</p></body></html>`,
@@ -1899,173 +2085,134 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         if (!y) return;
         try {
           if (r && c) window.open(c, "_blank");
-          else if (n) {
-            const x = window.open("", "_blank");
-            x &&
-              (x.document.write(
-                `<html><head><title>${e.name}</title></head><body style="margin:0;background:#111;display:flex;align-items:center;justify-content:center;min-height:100vh"><img src="${e.data}" style="max-width:100%;max-height:100vh"/></body></html>`,
-              ),
-              x.document.close());
+          else if (n && (c || e.data)) {
+            const x = c || e.data;
+            window.open(x, "_blank");
           }
         } catch {}
       };
     return l.jsxs("div", {
-      style: {
-        position: "fixed",
-        inset: 0,
-        zIndex: 1100,
-        background: "rgba(0,0,0,.85)",
-        display: "flex",
-        flexDirection: "column",
-      },
+      className: "cc-doc-viewer",
       children: [
+        l.jsx("button", {
+          type: "button",
+          className: "cc-doc-viewer-close",
+          onClick: t,
+          "aria-label": "Close",
+          children: "✕",
+        }),
         l.jsxs("div", {
-          style: {
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "8px 16px",
-            background: "rgba(0,0,0,.5)",
-            flexShrink: 0,
-          },
+          className: "cc-doc-viewer-toolbar",
           children: [
             l.jsxs("div", {
-              style: { display: "flex", alignItems: "center", gap: 8 },
+              className: "cc-doc-viewer-title",
               children: [
                 l.jsx("span", {
-                  style: { fontSize: 14 },
-                  children: fi(e.type),
+                  className: "cc-doc-viewer-icon",
+                  children: fi(mime),
                 }),
                 l.jsx("span", {
-                  style: { color: "#fff", fontSize: 13, fontWeight: 500 },
+                  className: "cc-doc-viewer-name",
+                  title: e.name,
                   children: e.name,
                 }),
                 l.jsxs("span", {
-                  style: { color: "#999", fontSize: 10 },
-                  children: [tr(e.size), " • ", e.uploadDate],
+                  className: "cc-doc-viewer-meta",
+                  children: [tr(e.size), " • ", uiDate(e.uploadDate) || "—"],
                 }),
               ],
             }),
             l.jsxs("div", {
-              style: { display: "flex", gap: 4 },
+              className: "cc-doc-viewer-actions",
               children: [
                 y &&
                   c &&
                   l.jsxs("button", {
+                    type: "button",
+                    className: "cc-doc-viewer-action-btn",
                     onClick: s,
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 4,
-                      padding: "5px 10px",
-                      background: "rgba(255,255,255,.1)",
-                      border: "none",
-                      borderRadius: 5,
-                      color: "#fff",
-                      cursor: "pointer",
-                      fontSize: 11,
-                    },
-                    children: [l.jsx(Mc, { size: 12 }), "פתח בטאב"],
+                    children: [
+                      l.jsx(Mc, { size: 12 }),
+                      l.jsx("span", {
+                        className: "cc-doc-viewer-action-label",
+                        children: "פתח בטאב",
+                      }),
+                    ],
                   }),
                 y &&
                   c &&
                   l.jsxs("button", {
+                    type: "button",
+                    className: "cc-doc-viewer-action-btn",
                     onClick: o,
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 4,
-                      padding: "5px 10px",
-                      background: "rgba(255,255,255,.1)",
-                      border: "none",
-                      borderRadius: 5,
-                      color: "#fff",
-                      cursor: "pointer",
-                      fontSize: 11,
-                    },
-                    children: [l.jsx($c, { size: 12 }), "הורד"],
+                    children: [
+                      l.jsx($c, { size: 12 }),
+                      l.jsx("span", {
+                        className: "cc-doc-viewer-action-label",
+                        children: "הורד",
+                      }),
+                    ],
                   }),
                 y &&
                   c &&
                   l.jsxs("button", {
+                    type: "button",
+                    className: "cc-doc-viewer-action-btn",
                     onClick: i,
-                    style: {
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 4,
-                      padding: "5px 10px",
-                      background: "rgba(255,255,255,.1)",
-                      border: "none",
-                      borderRadius: 5,
-                      color: "#fff",
-                      cursor: "pointer",
-                      fontSize: 11,
-                    },
-                    children: [l.jsx(mm, { size: 12 }), "הדפס"],
+                    children: [
+                      l.jsx(mm, { size: 12 }),
+                      l.jsx("span", {
+                        className: "cc-doc-viewer-action-label",
+                        children: "הדפס",
+                      }),
+                    ],
                   }),
-                l.jsx("button", {
-                  onClick: t,
-                  style: {
-                    padding: "5px 10px",
-                    background: "rgba(255,255,255,.15)",
-                    border: "none",
-                    borderRadius: 5,
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontSize: 13,
-                  },
-                  children: "✕",
-                }),
               ],
             }),
           ],
         }),
         l.jsx("div", {
-          style: {
-            flex: 1,
-            overflow: "auto",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 20,
-          },
-          children:
-            _ || (r && y && !c)
-              ? l.jsx("div", {
-                  style: { color: "#aaa", fontSize: 13 },
-                  children: "טוען מסמך...",
-                })
-              : n && c
-                ? l.jsx("img", {
-                    src: c,
-                    alt: e.name,
-                    style: {
-                      maxWidth: "100%",
-                      maxHeight: "100%",
-                      borderRadius: 8,
-                      boxShadow: "0 4px 32px rgba(0,0,0,.5)",
-                    },
-                  })
-                : r && c
-                  ? l.jsx("iframe", {
+          className: "cc-doc-viewer-body",
+          children: _
+            ? l.jsx("div", {
+                style: { color: "#aaa", fontSize: 13 },
+                children: "טוען מסמך...",
+              })
+            : n && c
+              ? l.jsx("img", { src: c, alt: e.name })
+              : r && c
+                ? mobilePdf
+                  ? l.jsxs("div", {
+                      className: "cc-doc-viewer-pdf-wrap",
+                      children: [
+                        l.jsxs("a", {
+                          href: c,
+                          target: "_blank",
+                          rel: "noopener noreferrer",
+                          className: "cc-doc-viewer-pdf-open",
+                          children: [
+                            l.jsx(Mc, { size: 14 }),
+                            " פתח PDF",
+                          ],
+                        }),
+                        l.jsx("embed", {
+                          src: c,
+                          type: "application/pdf",
+                          className: "cc-doc-viewer-pdf-frame",
+                        }),
+                      ],
+                    })
+                  : l.jsx("iframe", {
                       src: c,
                       title: e.name,
-                      style: {
-                        width: "100%",
-                        maxWidth: 900,
-                        height: "calc(100vh - 80px)",
-                        border: "none",
-                        borderRadius: 8,
-                        background: "#fff",
-                        boxShadow: "0 4px 32px rgba(0,0,0,.5)",
-                      },
+                      className: "cc-doc-viewer-pdf-frame",
                     })
                 : l.jsxs("div", {
                     style: { textAlign: "center", color: "#aaa" },
                     children: [
                       l.jsx("div", {
                         style: { fontSize: 64, marginBottom: 12 },
-                        children: fi(e.type),
+                        children: fi(mime),
                       }),
                       l.jsx("div", {
                         style: { fontSize: 16, color: "#fff", marginBottom: 4 },
@@ -2073,13 +2220,18 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       }),
                       l.jsxs("div", {
                         style: { fontSize: 12 },
-                        children: [e.type, " • ", tr(e.size)],
+                        children: [mime, " • ", tr(e.size)],
                       }),
-                      !e.data &&
-                        l.jsx("div", {
-                          style: { marginTop: 12, fontSize: 12, color: "#666" },
-                          children: "מסמך לדוגמה — העלה קובץ אמיתי לצפייה",
-                        }),
+                      loadErr
+                        ? l.jsx("div", {
+                            style: { marginTop: 12, fontSize: 12, color: u.red },
+                            children: loadErr,
+                          })
+                        : !y &&
+                          l.jsx("div", {
+                            style: { marginTop: 12, fontSize: 12, color: "#666" },
+                            children: "מסמך לדוגמה — העלה קובץ אמיתי לצפייה",
+                          }),
                     ],
                   }),
         }),
@@ -2951,7 +3103,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               }),
                               l.jsx("div", {
                                 style: { fontSize: 9, color: u.text3 },
-                                children: y.date,
+                                children: uiDate(y.date) || "—",
                               }),
                             ],
                           }),
@@ -3502,7 +3654,16 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         "#0891b2",
         "#ec4899",
       ],
-      PcLk = Pc(pj, n);
+      PcLk = Pc(pj, n),
+      mob = ul(),
+      rmPmt = (v, g) => {
+        if (PcStop(pj, n, i)) return;
+        const I = r.find((b) => b.id === v),
+          b = (I == null ? void 0 : I.pmts || []).find((fe) => fe.id === g);
+        F("למחוק תשלום?", () => {
+          (Qu(st, Lf, v, g, r), i("תשלום נמחק ✅"));
+        });
+      };
     return l.jsxs("div", {
       children: [
         l.jsxs("div", {
@@ -3639,6 +3800,25 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             lbl: !0,
                           }),
                         }),
+                        (() => {
+                          const G = (pj || []).find((de) => de.id === n),
+                            ft =
+                              G == null
+                                ? void 0
+                                : coFromPhaseGroup(G, v.phases);
+                          return ft
+                            ? l.jsx(CoFinDash, {
+                                fin: CoFinSummary(
+                                  ft,
+                                  Df,
+                                  r,
+                                  v.phases,
+                                  n,
+                                ),
+                                compact: mob,
+                              })
+                            : null;
+                        })(),
                       ],
                     }),
                     l.jsxs("div", {
@@ -3980,9 +4160,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                             },
                                                             children: [
                                                               "(",
-                                                              lt.start,
+                                                              uiDate(lt.start),
                                                               "–",
-                                                              lt.end,
+                                                              uiDate(lt.end),
                                                               ")",
                                                             ],
                                                           }),
@@ -5061,7 +5241,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                           children: [
                                             l.jsx("td", {
                                               style: { padding: "4px 6px" },
-                                              children: b.date || "—",
+                                              children: uiDate(b.date) || "—",
                                             }),
                                             l.jsx("td", {
                                               style: {
@@ -5165,7 +5345,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                         textDecoration:
                                                           "underline",
                                                       },
-                                                      children: b.paidDate,
+                                                      children: uiDate(b.paidDate),
                                                     }),
                                                 ],
                                               }),
@@ -5706,33 +5886,62 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                         {
                           style: {
                             display: "flex",
-                            justifyContent: "space-between",
-                            padding: "4px 0",
-                            fontSize: 11,
+                            alignItems: "center",
+                            gap: 8,
+                            padding: mob ? "10px 0" : "4px 0",
+                            fontSize: mob ? 12 : 11,
                             borderBottom: `1px solid ${u.border}`,
+                            minHeight: mob ? 44 : void 0,
                           },
                           children: [
-                            l.jsxs("span", {
+                            l.jsxs("div", {
+                              style: { flex: 1, minWidth: 0 },
                               children: [
-                                "#",
-                                v.num,
-                                " ",
-                                v.milestone || v.linkedStage || "",
+                                l.jsxs("div", {
+                                  style: { fontWeight: 600, color: u.text },
+                                  children: [
+                                    "#",
+                                    v.num,
+                                    " ",
+                                    v.milestone || v.linkedStage || "",
+                                  ],
+                                }),
+                                l.jsxs("div", {
+                                  style: {
+                                    fontSize: 11,
+                                    marginTop: 2,
+                                    color:
+                                      v.status === "paid" ? u.green : u.yellow,
+                                    fontWeight: 600,
+                                  },
+                                  children: [
+                                    "$",
+                                    FmtAmt(v.amt),
+                                    " ",
+                                    v.status === "paid" ? "✅ Paid" : "⏳ Pending",
+                                  ],
+                                }),
                               ],
                             }),
-                            l.jsxs("span", {
-                              style: {
-                                fontWeight: 600,
-                                color:
-                                  v.status === "paid" ? u.green : u.yellow,
-                              },
-                              children: [
-                                "$",
-                                FmtAmt(v.amt),
-                                " ",
-                                v.status === "paid" ? "✅" : "⏳",
-                              ],
-                            }),
+                            !PcLk &&
+                              l.jsx("button", {
+                                onClick: () => rmPmt(Dr.conId, v.id),
+                                style: {
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  flexShrink: 0,
+                                  width: mob ? 44 : 28,
+                                  height: mob ? 44 : 28,
+                                  background: u.red + "10",
+                                  border: "none",
+                                  borderRadius: 8,
+                                  cursor: "pointer",
+                                  color: u.red,
+                                },
+                                title: "מחק תשלום",
+                                children: l.jsx(Pe, { size: mob ? 16 : 12 }),
+                              }),
                           ],
                         },
                         v.id,
@@ -5826,24 +6035,26 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             l.jsx("span", {
                               style: {
                                 fontSize: 14,
-                                cursor: v.data || v.storagePath ? "pointer" : "default",
+                                cursor: docCanView(v, n) ? "pointer" : "default",
                               },
-                              onClick: () => (v.data || v.storagePath) && To(v),
+                              onClick: () =>
+                                docCanView(v, n) && To(docForViewer(v, n)),
                               children: fi(v.type),
                             }),
                             l.jsxs("div", {
                               style: {
                                 flex: 1,
-                                cursor: v.data || v.storagePath ? "pointer" : "default",
+                                cursor: docCanView(v, n) ? "pointer" : "default",
                               },
-                              onClick: () => (v.data || v.storagePath) && To(v),
+                              onClick: () =>
+                                docCanView(v, n) && To(docForViewer(v, n)),
                               children: [
                                 l.jsx("div", {
                                   style: {
                                     fontSize: 12,
                                     fontWeight: 500,
-                                    color: v.data || v.storagePath ? u.accent : u.text,
-                                    textDecoration: v.data || v.storagePath
+                                    color: docCanView(v, n) ? u.accent : u.text,
+                                    textDecoration: docCanView(v, n)
                                       ? "underline"
                                       : "none",
                                     textUnderlineOffset: 2,
@@ -5853,7 +6064,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 l.jsxs("div", {
                                   style: { fontSize: 9, color: u.text3 },
                                   children: [
-                                    v.uploadDate,
+                                    uiDate(v.uploadDate) || "—",
                                     " • ",
                                     tr(v.size),
                                     v.kind &&
@@ -5871,9 +6082,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 }),
                               ],
                             }),
-                            (v.data || v.storagePath) &&
+                            docCanView(v, n) &&
                               l.jsx("button", {
-                                onClick: () => To(v),
+                                onClick: () => To(docForViewer(v, n)),
                                 style: {
                                   background: u.accent + "10",
                                   border: "none",
@@ -5885,9 +6096,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                 title: "צפה",
                                 children: l.jsx(Jh, { size: 13 }),
                               }),
-                            (v.data || v.storagePath) &&
+                            docCanView(v, n) &&
                               l.jsx("button", {
-                                onClick: () => pu(v),
+                                onClick: () => pu(v, n),
                                 style: {
                                   background: u.accent + "10",
                                   border: "none",
@@ -6751,7 +6962,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               },
                               children: [
                                 l.jsx("span", { children: y.who }),
-                                l.jsx("span", { children: y.due }),
+                                l.jsx("span", { children: uiDate(y.due) || "—" }),
                               ],
                             }),
                           ],
@@ -6799,7 +7010,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                       l.jsx(D, {
                         label: "יעד",
                         type: "date",
-                        value: k.due || "",
+                        value: uiInputDate(k.due) || "",
                         onChange: (C) => y({ due: C }),
                       }),
                     ],
@@ -6860,6 +7071,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
     contacts: i,
     setContacts: o,
     phases: s,
+    setPhases: setPhasesFromBudget,
     showToast: d,
   }) => {
     var P;
@@ -7006,34 +7218,37 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
         if (PcStop(r, n, d)) return;
         if (!(yn != null && yn.title.trim()))
           return void d("נא למלא כותרת");
-        const z = {
-          id: yn.id || ve(),
-          title: yn.title.trim(),
-          amt:
-            yn.amt === "" || yn.amt == null
-              ? null
-              : parseFloat(yn.amt) || null,
-          status: yn.status || "pending",
-          date: wu(yn.date) || "",
-          scopeNotes: yn.scopeNotes || "",
-          attachments: yn.attachments || [],
-        };
+        const L = dn === "edit",
+          z = {
+            id: yn.id || ve(),
+            title: yn.title.trim(),
+            amt:
+              yn.amt === "" || yn.amt == null
+                ? null
+                : parseFloat(yn.amt) || null,
+            status: yn.status || "pending",
+            date: wu(yn.date) || "",
+            scopeNotes: yn.scopeNotes || "",
+            attachments: yn.attachments || [],
+          };
         (rn((w) => ({
           ...w,
-          changeOrders:
-            dn === "edit"
-              ? (w.changeOrders || []).map((L) =>
-                  L.id === z.id ? z : L,
-                )
-              : [...(w.changeOrders || []), z],
+          changeOrders: L
+            ? (w.changeOrders || []).map((Lr) =>
+                Lr.id === z.id ? z : Lr,
+              )
+            : [...(w.changeOrders || []), z],
         })),
-          d(
-            dn === "edit"
-              ? "שינוי הזמנה עודכן ✅"
-              : "שינוי הזמנה נוסף ✅",
-          ),
+          d(L ? "שינוי הזמנה עודכן ✅" : "שינוי הזמנה נוסף ✅"),
           pn(null),
           _n(null));
+      },
+      addCoToPhases = (z) => {
+        if (PcStop(r, n, d)) return;
+        if (!Rt || !n || !setPhasesFromBudget) return;
+        if (coHasPhaseGroup(z, n, s)) return;
+        (addCoPhaseGroup(z, n, setPhasesFromBudget),
+          d("Added to Construction Phases ✅"));
       },
       an = (z) => {
         const w = {
@@ -7291,7 +7506,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           H,
                           {
                             sz: "sm",
-                            onClick: () => z.data && wn(z),
+                            onClick: () =>
+                              docCanView(z, n) && wn(docForViewer(z, n)),
                             children: ["📎 ", z.name],
                           },
                           z.id,
@@ -7349,17 +7565,42 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                   },
                                   children: [
                                     cn(z.amt),
-                                    z.date ? ` • ${z.date}` : "",
+                                    z.date ? ` • ${uiDate(z.date)}` : "",
                                     (z.attachments || []).length
                                       ? ` • ${z.attachments.length} קבצים`
                                       : "",
                                   ],
                                 }),
+                                l.jsx(CoFinDash, {
+                                  fin: CoFinSummary(
+                                    z,
+                                    e,
+                                    i,
+                                    coLinkedPhases(z, s, n),
+                                    n,
+                                  ),
+                                  compact: a,
+                                }),
                               ],
                             }),
                             l.jsxs("div", {
-                              style: { display: "flex", gap: 4 },
+                              style: {
+                                display: "flex",
+                                gap: 4,
+                                flexWrap: "wrap",
+                                justifyContent: "flex-end",
+                              },
                               children: [
+                                Rt &&
+                                  !PcLk &&
+                                  l.jsx(H, {
+                                    sz: "sm",
+                                    disabled: coHasPhaseGroup(z, n, s),
+                                    onClick: () => addCoToPhases(z),
+                                    children: coHasPhaseGroup(z, n, s)
+                                      ? "Added ✓"
+                                      : "Add to Construction Phases",
+                                  }),
                                 !PcLk &&
                                   l.jsx(H, {
                                     sz: "sm",
@@ -7432,14 +7673,38 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             style: { fontSize: 10, color: u.text3 },
                             children: [
                               cn(z.amt),
-                              z.date ? ` • ${z.date}` : "",
+                              z.date ? ` • ${uiDate(z.date)}` : "",
                             ],
+                          }),
+                          l.jsx(CoFinDash, {
+                            fin: CoFinSummary(
+                              z,
+                              e,
+                              i,
+                              coLinkedPhases(z, s, n),
+                              n,
+                            ),
+                            compact: a,
                           }),
                         ],
                       }),
                       l.jsxs("div", {
-                        style: { display: "flex", gap: 4 },
+                        style: {
+                          display: "flex",
+                          gap: 4,
+                          flexWrap: "wrap",
+                          justifyContent: "flex-end",
+                        },
                         children: [
+                          !PcLk &&
+                            l.jsx(H, {
+                              sz: "sm",
+                              disabled: coHasPhaseGroup(z, n, s),
+                              onClick: () => addCoToPhases(z),
+                              children: coHasPhaseGroup(z, n, s)
+                                ? "Added ✓"
+                                : "Add to Construction Phases",
+                            }),
                           !PcLk &&
                             l.jsx(H, {
                               sz: "sm",
@@ -7621,7 +7886,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             fontSize: 11,
                             color: u.text2,
                           },
-                          children: z.date,
+                          children: uiDate(z.date) || "—",
                         }),
                         l.jsx("td", {
                           style: {
@@ -7747,7 +8012,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     l.jsx(D, {
                       label: "תאריך חוזה",
                       type: "date",
-                      value: Qe.contractDate,
+                      value: uiInputDate(Qe.contractDate),
                       onChange: (z) =>
                         No((w) => ({ ...w, contractDate: z })),
                     }),
@@ -7803,10 +8068,11 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             children: [
                               l.jsx("span", {
                                 style: {
-                                  cursor: z.data ? "pointer" : "default",
-                                  color: z.data ? u.accent : u.text2,
+                                  cursor: docCanView(z, n) ? "pointer" : "default",
+                                  color: docCanView(z, n) ? u.accent : u.text2,
                                 },
-                                onClick: () => z.data && wn(z),
+                                onClick: () =>
+                                  docCanView(z, n) && wn(docForViewer(z, n)),
                                 children: z.name,
                               }),
                               l.jsx("button", {
@@ -7886,7 +8152,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     l.jsx(D, {
                       label: "תאריך שינוי הזמנה",
                       type: "date",
-                      value: yn.date,
+                      value: uiInputDate(yn.date),
                       onChange: (z) => _n((w) => ({ ...w, date: z })),
                     }),
                   ],
@@ -7956,10 +8222,11 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                           children: [
                             l.jsx("span", {
                               style: {
-                                cursor: z.data ? "pointer" : "default",
-                                color: z.data ? u.accent : u.text2,
+                                cursor: docCanView(z, n) ? "pointer" : "default",
+                                color: docCanView(z, n) ? u.accent : u.text2,
                               },
-                              onClick: () => z.data && wn(z),
+                              onClick: () =>
+                                docCanView(z, n) && wn(docForViewer(z, n)),
                               children: z.name,
                             }),
                             l.jsx("button", {
@@ -8017,7 +8284,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     l.jsx(D, {
                       label: "תאריך",
                       type: "date",
-                      value: _.date,
+                      value: uiInputDate(_.date),
                       onChange: (z) => k((w) => ({ ...w, date: z })),
                     }),
                     l.jsx(D, {
@@ -8102,7 +8369,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                 l.jsx(D, {
                   label: "תאריך",
                   type: "date",
-                  value: y.paidDate || new Date().toISOString().split("T")[0],
+                  value: uiInputDate(y.paidDate) || new Date().toISOString().split("T")[0],
                   onChange: (z) => C((w) => ({ ...w, paidDate: z })),
                 }),
                 l.jsx(D, {
@@ -8197,7 +8464,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     l.jsx(D, {
                       label: "תאריך",
                       type: "date",
-                      value: Se.date,
+                      value: uiInputDate(Se.date),
                       onChange: (z) => _e((w) => ({ ...w, date: z })),
                     }),
                     l.jsx(D, {
@@ -8309,10 +8576,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       }),
       [A, ue] = T.useState(null),
       [P, z] = T.useState(null),
-      [w, L] = T.useState(""),
-      [ee, te] = T.useState(""),
-      [$, Q] = T.useState(""),
-      [q, oe] = T.useState(""),
+      [scopeStgDrafts, setScopeStgDrafts] = T.useState({}),
+      scopeStgEmpty = { name: "", desc: "", start: "", end: "" },
+      scopeStgDraft = (S) => scopeStgDrafts[S] || scopeStgEmpty,
+      patchScopeStgDraft = (S, N) =>
+        setScopeStgDrafts((K) => ({
+          ...K,
+          [S]: { ...(K[S] || scopeStgEmpty), ...N },
+        })),
+      clrScopeStgDraft = (S) =>
+        setScopeStgDrafts((N) => {
+          const K = { ...N };
+          return (delete K[S], K);
+        }),
       [ko, To] = T.useState(null),
       [Sl, _Sl] = T.useState(""),
       [Cl, _Cl] = T.useState(""),
@@ -8353,7 +8629,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           ? N
           : null;
         K
-          ? To(K)
+          ? To(docForViewer(K, r))
           : S.receipt &&
             To({
               id: S.receiptDocId || S.id,
@@ -8557,12 +8833,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
       mr = (S) => {
         if (PcStop(pj, r, o)) return;
         p("למחוק תשלום?", () => {
-          const N = (a.pmts || []).find((K) => K.id === S);
-          (de(a.id, (K) => ({
-            ...K,
-            pmts: (K.pmts || []).filter((X) => X.id !== S),
-          })),
-            Uu(d, a.id, S, a, N),
+          (Qu(t, d, a.id, S, e),
+            a && c({ ...a, pmts: (a.pmts || []).filter((X) => X.id !== S) }),
             o("תשלום נמחק ✅"));
         });
       },
@@ -8589,25 +8861,23 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
           o("שולם ✅"));
       },
       $n = (S) => {
-        if (!w) return;
-        const N = {
+        const N = scopeStgDraft(S);
+        if (!N.name) return;
+        const K = {
           id: ve(),
-          name: w,
-          desc: ee,
-          start: $,
-          end: q,
+          name: N.name,
+          desc: N.desc,
+          start: N.start,
+          end: N.end,
           status: "not_started",
         };
-        (de(a.id, (K) => ({
-          ...K,
-          scopes: (K.scopes || []).map((X) =>
-            X.id === S ? { ...X, stages: [...X.stages, N] } : X,
+        (de(a.id, (X) => ({
+          ...X,
+          scopes: (X.scopes || []).map((Y) =>
+            Y.id === S ? { ...Y, stages: [...Y.stages, K] } : Y,
           ),
         })),
-          L(""),
-          te(""),
-          Q(""),
-          oe(""),
+          clrScopeStgDraft(S),
           o("שלב נוסף ✅"));
       },
       v = (S, N) =>
@@ -9123,7 +9393,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               l.jsx(D, {
                                 label: "תפוגת ביטוח",
                                 type: "date",
-                                value: a.insurance || "",
+                                value: uiInputDate(a.insurance) || "",
                                 onChange: (S) =>
                                   de(a.id, (N) => ({ ...N, insurance: S })),
                               }),
@@ -9520,7 +9790,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                         l.jsx(D, {
                                                           label: "Start",
                                                           type: "date",
-                                                          value: O.start || "",
+                                                          value: uiInputDate(O.start) || "",
                                                           onChange: (Ke) =>
                                                             g(
                                                               S.id,
@@ -9532,7 +9802,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                         l.jsx(D, {
                                                           label: "End",
                                                           type: "date",
-                                                          value: O.end || "",
+                                                          value: uiInputDate(O.end) || "",
                                                           onChange: (Ke) =>
                                                             g(
                                                               S.id,
@@ -9676,10 +9946,10 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                                   },
                                                                   children: [
                                                                     "📅 ",
-                                                                    O.start ||
+                                                                    uiDate(O.start) ||
                                                                       "?",
                                                                     " → ",
-                                                                    O.end ||
+                                                                    uiDate(O.end) ||
                                                                       "?",
                                                                   ],
                                                                 }),
@@ -9804,13 +10074,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                             children: [
                                               l.jsx(D, {
                                                 ph: "Stage name",
-                                                value: w,
-                                                onChange: L,
+                                                value: scopeStgDraft(S.id).name,
+                                                onChange: (Ke) =>
+                                                  patchScopeStgDraft(S.id, {
+                                                    name: Ke,
+                                                  }),
                                               }),
                                               l.jsx(D, {
                                                 ph: "Description",
-                                                value: ee,
-                                                onChange: te,
+                                                value: scopeStgDraft(S.id).desc,
+                                                onChange: (Ke) =>
+                                                  patchScopeStgDraft(S.id, {
+                                                    desc: Ke,
+                                                  }),
                                               }),
                                             ],
                                           }),
@@ -9825,14 +10101,20 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                             children: [
                                               l.jsx(D, {
                                                 type: "date",
-                                                value: $,
-                                                onChange: Q,
+                                                value: scopeStgDraft(S.id).start,
+                                                onChange: (Ke) =>
+                                                  patchScopeStgDraft(S.id, {
+                                                    start: Ke,
+                                                  }),
                                                 ph: "Start",
                                               }),
                                               l.jsx(D, {
                                                 type: "date",
-                                                value: q,
-                                                onChange: oe,
+                                                value: scopeStgDraft(S.id).end,
+                                                onChange: (Ke) =>
+                                                  patchScopeStgDraft(S.id, {
+                                                    end: Ke,
+                                                  }),
                                                 ph: "End",
                                               }),
                                               l.jsx(H, {
@@ -9949,7 +10231,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             l.jsxs("div", {
                               style: {
                                 display: "grid",
-                                gridTemplateColumns: "repeat(3,1fr)",
+                                gridTemplateColumns: pt
+                                  ? "1fr"
+                                  : "repeat(3,1fr)",
                                 gap: 6,
                               },
                               children: [
@@ -10042,7 +10326,190 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                               onChange: Qe,
                             }),
                             (a.pmts || []).length > 0
-                              ? l.jsxs("table", {
+                              ? l.jsxs(l.Fragment, {
+                                  children: [
+                                    pt &&
+                                      l.jsx("div", {
+                                        style: {
+                                          display: "flex",
+                                          flexDirection: "column",
+                                          gap: 8,
+                                        },
+                                        children: (a.pmts || []).map((Y) =>
+                                          l.jsxs(
+                                            "div",
+                                            {
+                                              className: "cc-pmt-card",
+                                              style: {
+                                                background: u.card,
+                                                border: `1px solid ${u.border}`,
+                                                borderRadius: 10,
+                                                padding: 12,
+                                              },
+                                              children: [
+                                                l.jsxs("div", {
+                                                  style: {
+                                                    display: "flex",
+                                                    justifyContent:
+                                                      "space-between",
+                                                    alignItems: "flex-start",
+                                                    gap: 8,
+                                                  },
+                                                  children: [
+                                                    l.jsxs("div", {
+                                                      style: { flex: 1 },
+                                                      children: [
+                                                        l.jsxs("div", {
+                                                          style: {
+                                                            fontSize: 14,
+                                                            fontWeight: 700,
+                                                            fontFamily:
+                                                              "'JetBrains Mono'",
+                                                          },
+                                                          children: [
+                                                            "#",
+                                                            Y.num,
+                                                            " · $",
+                                                            FmtAmt(Y.amt),
+                                                          ],
+                                                        }),
+                                                        l.jsx("div", {
+                                                          style: {
+                                                            fontSize: 12,
+                                                            color: u.text2,
+                                                            marginTop: 4,
+                                                          },
+                                                          children:
+                                                            Y.milestone || "—",
+                                                        }),
+                                                        Y.linkedStage &&
+                                                          l.jsxs("div", {
+                                                            style: {
+                                                              fontSize: 10,
+                                                              color: u.accent,
+                                                              marginTop: 2,
+                                                            },
+                                                            children: [
+                                                              "🔗 ",
+                                                              Y.linkedStage,
+                                                            ],
+                                                          }),
+                                                      ],
+                                                    }),
+                                                    !PcLk &&
+                                                      l.jsx("button", {
+                                                        onClick: () =>
+                                                          mr(Y.id),
+                                                        style: {
+                                                          display: "flex",
+                                                          alignItems: "center",
+                                                          justifyContent:
+                                                            "center",
+                                                          width: 44,
+                                                          height: 44,
+                                                          flexShrink: 0,
+                                                          background:
+                                                            u.red + "12",
+                                                          border: "none",
+                                                          borderRadius: 8,
+                                                          cursor: "pointer",
+                                                          color: u.red,
+                                                        },
+                                                        title: "מחק תשלום",
+                                                        children: l.jsx(Pe, {
+                                                          size: 16,
+                                                        }),
+                                                      }),
+                                                  ],
+                                                }),
+                                                l.jsxs("div", {
+                                                  style: {
+                                                    display: "flex",
+                                                    flexWrap: "wrap",
+                                                    gap: 8,
+                                                    alignItems: "center",
+                                                    marginTop: 10,
+                                                  },
+                                                  children: [
+                                                    l.jsx(ot, {
+                                                      color:
+                                                        Y.status === "paid"
+                                                          ? u.green
+                                                          : u.yellow,
+                                                      children:
+                                                        Y.status === "paid"
+                                                          ? "✅ Paid"
+                                                          : "⏳ Pending",
+                                                    }),
+                                                    l.jsx("span", {
+                                                      style: {
+                                                        fontSize: 11,
+                                                        color: u.text3,
+                                                      },
+                                                      children: uiDate(Y.due)
+                                                        ? `Due: ${uiDate(Y.due)}`
+                                                        : "No due date",
+                                                    }),
+                                                    Y.paidDate &&
+                                                      l.jsxs("span", {
+                                                        style: {
+                                                          fontSize: 11,
+                                                          color: u.text3,
+                                                        },
+                                                        children: [
+                                                          "Paid: ",
+                                                          uiDate(Y.paidDate),
+                                                        ],
+                                                      }),
+                                                  ],
+                                                }),
+                                                !PcLk &&
+                                                  l.jsxs("div", {
+                                                    style: {
+                                                      display: "flex",
+                                                      flexWrap: "wrap",
+                                                      gap: 6,
+                                                      marginTop: 10,
+                                                    },
+                                                    children: [
+                                                      l.jsx(H, {
+                                                        sz: "sm",
+                                                        onClick: () => yd(Y),
+                                                        children: "✏️ Edit",
+                                                      }),
+                                                      Y.status !== "paid" &&
+                                                        l.jsx(H, {
+                                                          sz: "sm",
+                                                          v: "success",
+                                                          onClick: () =>
+                                                            gr(Y.id),
+                                                          children: "Mark Paid",
+                                                        }),
+                                                      l.jsx(H, {
+                                                        sz: "sm",
+                                                        v: "secondary",
+                                                        onClick: () => {
+                                                          var gn;
+                                                          (ft(Y.id),
+                                                            (gn =
+                                                              Ie.current) ==
+                                                              null ||
+                                                              gn.click());
+                                                        },
+                                                        children: Y.receiptDocId
+                                                          ? "📎 Receipt"
+                                                          : "📎 Attach",
+                                                      }),
+                                                    ],
+                                                  }),
+                                              ],
+                                            },
+                                            Y.id,
+                                          ),
+                                        ),
+                                      }),
+                                    l.jsxs("table", {
+                                  className: "cc-desktop-only",
                                   style: {
                                     width: "100%",
                                     borderCollapse: "collapse",
@@ -10171,7 +10638,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                   fontSize: 11,
                                                   color: u.text2,
                                                 },
-                                                children: Y.due || "—",
+                                                children: uiDate(Y.due) || "—",
                                               }),
                                               l.jsxs("td", {
                                                 style: { padding: "7px 8px" },
@@ -10194,7 +10661,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                       },
                                                       children: [
                                                         "Paid: ",
-                                                        Y.paidDate,
+                                                        uiDate(Y.paidDate),
                                                       ],
                                                     }),
                                                 ],
@@ -10218,18 +10685,18 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                       (na == null
                                                         ? void 0
                                                         : na.data),
-                                                    ie =
-                                                      (na == null
-                                                        ? void 0
-                                                        : na.type) ||
-                                                      ((O == null
-                                                        ? void 0
-                                                        : O.startsWith(
-                                                            "data:application/pdf",
-                                                          ))
+                                                    storedReceipt =
+                                                      docCanView(na, r),
+                                                    ie = na
+                                                      ? docMimeType(na)
+                                                      : (O == null
+                                                          ? void 0
+                                                          : O.startsWith(
+                                                              "data:application/pdf",
+                                                            ))
                                                         ? "application/pdf"
-                                                        : "image/jpeg");
-                                                  return O
+                                                        : "image/jpeg";
+                                                  return O || storedReceipt
                                                     ? l.jsxs("div", {
                                                         style: {
                                                           display: "flex",
@@ -10237,7 +10704,9 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                           gap: 4,
                                                         },
                                                         children: [
-                                                          ie.includes("pdf")
+                                                          ie.includes("pdf") ||
+                                                          (storedReceipt &&
+                                                            !O)
                                                             ? l.jsx(
                                                                 "button",
                                                                 {
@@ -10260,23 +10729,52 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                                     "📄",
                                                                 },
                                                               )
-                                                            : l.jsx("img", {
-                                                                src: O,
-                                                                onClick: () =>
-                                                                  Jo(Y),
-                                                                style: {
-                                                                  width: 40,
-                                                                  height: 40,
-                                                                  objectFit:
-                                                                    "cover",
-                                                                  borderRadius: 6,
-                                                                  cursor:
-                                                                    "pointer",
-                                                                  border: `2px solid ${u.green}40`,
-                                                                },
-                                                                title:
-                                                                  "לחץ להגדלה",
-                                                              }),
+                                                            : O
+                                                              ? l.jsx("img", {
+                                                                  src: O,
+                                                                  onClick: () =>
+                                                                    Jo(Y),
+                                                                  style: {
+                                                                    width: 40,
+                                                                    height: 40,
+                                                                    objectFit:
+                                                                      "cover",
+                                                                    borderRadius: 6,
+                                                                    cursor:
+                                                                      "pointer",
+                                                                    border: `2px solid ${u.green}40`,
+                                                                  },
+                                                                  title:
+                                                                    "לחץ להגדלה",
+                                                                })
+                                                              : l.jsx(
+                                                                  "button",
+                                                                  {
+                                                                    onClick: () =>
+                                                                      Jo(Y),
+                                                                    style: {
+                                                                      width: 40,
+                                                                      height: 40,
+                                                                      background:
+                                                                        u.card2,
+                                                                      border: `2px solid ${u.green}40`,
+                                                                      borderRadius: 6,
+                                                                      cursor:
+                                                                        "pointer",
+                                                                      color:
+                                                                        u.accent,
+                                                                    },
+                                                                    title:
+                                                                      "לחץ להגדלה",
+                                                                    children:
+                                                                      l.jsx(
+                                                                        Jh,
+                                                                        {
+                                                                          size: 16,
+                                                                        },
+                                                                      ),
+                                                                  },
+                                                                ),
                                                           l.jsxs("div", {
                                                             style: {
                                                               display: "flex",
@@ -10421,6 +10919,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                         ),
                                       ),
                                     }),
+                                  ],
+                                }),
                                   ],
                                 })
                               : l.jsx("div", {
@@ -10624,7 +11124,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                       padding: "6px 8px",
                                                       fontSize: 11,
                                                     },
-                                                    children: ie.date || "—",
+                                                    children: uiDate(ie.date) || "—",
                                                   }),
                                                   l.jsx("td", {
                                                     style: {
@@ -10749,7 +11249,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                                               textDecoration:
                                                                 "underline",
                                                             },
-                                                            children: ie.paidDate,
+                                                            children: uiDate(ie.paidDate),
                                                           }),
                                                       ],
                                                     }),
@@ -10971,7 +11471,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                             const Qt = S && typeof S === "object" ? S : {},
                               Ri = Qt.name || "Invalid document",
                               na = Qt.type || "",
-                              yl = !!(Qt.data || Qt.storagePath);
+                              yl = docCanView(Qt, r);
                             return l.jsxs(
                               "div",
                               {
@@ -10988,7 +11488,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                       fontSize: 14,
                                       cursor: yl ? "pointer" : "default",
                                     },
-                                    onClick: () => yl && To(Qt),
+                                    onClick: () =>
+                                      yl && To(docForViewer(Qt, r)),
                                     children: fi(na),
                                   }),
                                   l.jsxs("div", {
@@ -10996,7 +11497,8 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                       flex: 1,
                                       cursor: yl ? "pointer" : "default",
                                     },
-                                    onClick: () => yl && To(Qt),
+                                    onClick: () =>
+                                      yl && To(docForViewer(Qt, r)),
                                     children: [
                                       l.jsx("div", {
                                         style: {
@@ -11014,7 +11516,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                       l.jsxs("div", {
                                         style: { fontSize: 9, color: u.text3 },
                                         children: [
-                                          Qt.uploadDate || "—",
+                                          uiDate(Qt.uploadDate) || "—",
                                           " • ",
                                           tr(Qt.size),
                                           Qt.kind &&
@@ -11073,7 +11575,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                   }),
                                   yl &&
                                     l.jsx("button", {
-                                      onClick: () => To(Qt),
+                                      onClick: () => To(docForViewer(Qt, r)),
                                       style: {
                                         background: u.accent + "10",
                                         border: "none",
@@ -11087,7 +11589,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                                     }),
                                   yl &&
                                     l.jsx("button", {
-                                      onClick: () => pu(Qt),
+                                      onClick: () => pu(Qt, r),
                                       style: {
                                         background: u.accent + "10",
                                         border: "none",
@@ -11980,15 +12482,19 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
             children: [
               l.jsx("span", { style: { fontSize: 15 }, children: fi(w.type) }),
               l.jsxs("div", {
-                style: { flex: 1, cursor: "pointer" },
-                onClick: () => m(w),
+                style: {
+                  flex: 1,
+                  cursor: docCanView(w, i) ? "pointer" : "default",
+                },
+                onClick: () =>
+                  docCanView(w, i) && m(docForViewer(w, i)),
                 children: [
                   l.jsx("div", {
                     style: {
                       fontSize: 12,
                       fontWeight: 500,
-                      color: u.accent,
-                      textDecoration: "underline",
+                      color: docCanView(w, i) ? u.accent : u.text3,
+                      textDecoration: docCanView(w, i) ? "underline" : "none",
                       textUnderlineOffset: 2,
                     },
                     children: w.name,
@@ -11996,7 +12502,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                   l.jsxs("div", {
                     style: { fontSize: 9, color: u.text3 },
                     children: [
-                      w.uploadDate,
+                      uiDate(w.uploadDate) || "—",
                       w.size > 0 && " • " + tr(w.size),
                       w.notes && " • " + w.notes,
                     ],
@@ -12008,23 +12514,38 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                         color:
                           new Date(w.expiry) < new Date() ? u.red : u.yellow,
                       },
-                      children: ["תפוגה: ", w.expiry],
+                      children: ["תפוגה: ", uiDate(w.expiry) || "—"],
                     }),
                 ],
               }),
-              l.jsx("button", {
-                onClick: () => m(w),
-                style: {
-                  background: u.accent + "10",
-                  border: "none",
-                  borderRadius: 5,
-                  padding: 4,
-                  cursor: "pointer",
-                  color: u.accent,
-                },
-                title: "צפה",
-                children: l.jsx(Jh, { size: 13 }),
-              }),
+              docCanView(w, i) &&
+                l.jsx("button", {
+                  onClick: () => m(docForViewer(w, i)),
+                  style: {
+                    background: u.accent + "10",
+                    border: "none",
+                    borderRadius: 5,
+                    padding: 4,
+                    cursor: "pointer",
+                    color: u.accent,
+                  },
+                  title: "צפה",
+                  children: l.jsx(Jh, { size: 13 }),
+                }),
+              docCanView(w, i) &&
+                l.jsx("button", {
+                  onClick: () => pu(w, i),
+                  style: {
+                    background: u.accent + "10",
+                    border: "none",
+                    borderRadius: 5,
+                    padding: 4,
+                    cursor: "pointer",
+                    color: u.accent,
+                  },
+                  title: "הורד",
+                  children: l.jsx($c, { size: 13 }),
+                }),
               l.jsx("button", {
                 onClick: () => V(w.id),
                 style: {
@@ -12116,7 +12637,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
               l.jsx(D, {
                 label: "תפוגה",
                 type: "date",
-                value: c.expiry,
+                value: uiInputDate(c.expiry),
                 onChange: (w) => f((L) => ({ ...L, expiry: w })),
               }),
               l.jsx(D, {
@@ -12699,7 +13220,7 @@ const ve = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36
                     l.jsx("div", { style: { fontSize: 12 }, children: n.msg }),
                     l.jsx("div", {
                       style: { fontSize: 9, color: u.text3 },
-                      children: new Date(n.ts).toLocaleString("he-IL"),
+                      children: uiDateTime(n.ts) || new Date(n.ts).toLocaleString("he-IL"),
                     }),
                   ],
                 }),
@@ -13347,6 +13868,206 @@ Thank you`);
           }),
         x,
       ],
+    });
+  },
+  CoPhaseGroupName = (I) => (I?.title || "").trim(),
+  CO_LEGACY_GROUP_LINKS = {
+    "Cabinet Change Order": {
+      coId: "81s9vk1ms3pqzt4",
+      titles: ["Jordan Cabinets Change Order"],
+    },
+  },
+  coLegacyGroupsForCo = (I) => {
+    if (!I?.id) return [];
+    return Object.entries(CO_LEGACY_GROUP_LINKS)
+      .filter(
+        ([, b]) => b.coId === I.id || b.titles.includes(CoPhaseGroupName(I)),
+      )
+      .map(([b]) => b);
+  },
+  coFromLegacyGroup = (I, b) => {
+    const fe = CO_LEGACY_GROUP_LINKS[b];
+    if (!fe) return null;
+    return (
+      (I.changeOrders || []).find((G) => G.id === fe.coId) ||
+      (I.changeOrders || []).find((G) =>
+        fe.titles.includes(CoPhaseGroupName(G)),
+      ) ||
+      null
+    );
+  },
+  phaseLinkedCoId = (I) => {
+    if (I == null ? void 0 : I.coId) return I.coId;
+    const b = String((I == null ? void 0 : I.who) || "");
+    return b.startsWith("co:") ? b.slice(3) : null;
+  },
+  coHasPhaseGroup = (I, b, fe) =>
+    !!I?.id &&
+    !!b &&
+    (fe || []).some((G) => {
+      if (G.pid !== b) return !1;
+      const ft = phaseLinkedCoId(G);
+      return (
+        ft === I.id ||
+        (!ft &&
+          ((CoPhaseGroupName(I) &&
+            (G.group || "") === CoPhaseGroupName(I)) ||
+            coLegacyGroupsForCo(I).includes(G.group || "")))
+      );
+    }),
+  coFromPhaseGroup = (I, b) => {
+    if (!I) return null;
+    for (const fe of b || []) {
+      const G = phaseLinkedCoId(fe);
+      if (G) {
+        const ft = (I.changeOrders || []).find(($) => $.id === G);
+        if (ft) return ft;
+      }
+    }
+    const $ = (b || []).find((Q) => Q.group)?.group;
+    if (!$) return null;
+    return (
+      (I.changeOrders || []).find((Q) => CoPhaseGroupName(Q) === $) ||
+      coFromLegacyGroup(I, $)
+    );
+  },
+  coLinkedPhases = (I, b, fe) => {
+    const G = CoPhaseGroupName(I),
+      ft = coLegacyGroupsForCo(I);
+    return (b || []).filter(($) => {
+      if ($.pid !== fe) return !1;
+      const Q = phaseLinkedCoId($);
+      if (Q) return Q === I.id;
+      const hn = $.group || "";
+      return !!(
+        (G && hn === G) ||
+        (ft.length && ft.includes(hn))
+      );
+    });
+  },
+  addCoPhaseGroup = (I, b, fe) => {
+    const G = CoPhaseGroupName(I);
+    if (!G || !b || !I.id || !fe) return;
+    fe((ft) => {
+      if (coHasPhaseGroup(I, b, ft)) return ft;
+      const $ = ft
+        .filter((Q) => Q.pid === b)
+        .reduce((Q, hn) => Math.max(Q, hn.ord || 0), 0);
+      return [
+        ...ft,
+        {
+          id: ve(),
+          pid: b,
+          coId: I.id,
+          name: G,
+          he: G,
+          group: G,
+          ord: $ + 1,
+          status: "pending",
+          progress: 0,
+          who: `co:${I.id}`,
+          checklists: [],
+        },
+      ];
+    });
+  },
+  CoAllScopeIds = (I, b, fe) => {
+    const G = new Set();
+    for (const ft of fe) RpScopeIds(I, b, ft).forEach(($) => G.add($));
+    return G;
+  },
+  CoPayLinked = (I, b, fe, G) =>
+    I.pid === b &&
+    ((I.phId && fe.has(I.phId)) || (I.scopeId && G.has(I.scopeId))),
+  CoFinSummary = (I, b, fe, G, ft) => {
+    const Q = new Set((G || []).map((mn) => mn.id)),
+      hn = CoAllScopeIds(fe, ft, Q),
+      de = (mn) => CoPayLinked(mn, ft, Q, hn),
+      mn = (b || []).filter((Rt) => de(Rt) && IsStageCost(Rt)),
+      Rt = mn.reduce((Ve, fr) => Ve + RpPayAmt(fr), 0),
+      Ve = (b || []).filter(
+        (fr) => de(fr) && (fr.source === "pmt" || fr.pmtId),
+      ),
+      fr = Ve.reduce((hr, xr) => hr + RpPayAmt(xr), 0),
+      hr = new Set(Ve.map((xr) => xr.pmtId).filter(Boolean));
+    let xr = 0;
+    for (const mr of fe || [])
+      for (const kt of mr.scopes || [])
+        if (kt.pid === ft && hn.has(kt.id))
+          for (const Zf of mr.pmts || [])
+            (Zf.status === "paid" &&
+              (!Zf.scopeId || Zf.scopeId === kt.id) &&
+              !hr.has(Zf.id) &&
+              (xr += RpPayAmt(Zf)));
+    const mr = fr + xr,
+      kt = Rt + mr,
+      Zf = RpCoAmt(I),
+      hd = Zf - kt,
+      pd = Zf > 0 ? (hd / Zf) * 100 : 0;
+    return {
+      contractValue: Zf,
+      expenses: Rt,
+      contractorPayments: mr,
+      totalCost: kt,
+      profit: hd,
+      margin: pd,
+    };
+  },
+  CoFinDash = ({ fin: I, compact: b }) => {
+    if (!I) return null;
+    const fe = [
+        ["Contract Value", RpFmt(I.contractValue), u.blue],
+        ["Expenses", RpFmt(I.expenses), u.yellow],
+        ["Contractor Payments", RpFmt(I.contractorPayments), u.accent],
+        ["Total Cost", RpFmt(I.totalCost), u.text],
+        ["Profit", RpFmt(I.profit), I.profit >= 0 ? u.green : u.red],
+        ["Margin", RpPct(I.margin), I.profit >= 0 ? u.green : u.red],
+      ];
+    return l.jsx("div", {
+      style: {
+        display: "grid",
+        gridTemplateColumns: b ? "repeat(2, minmax(0, 1fr))" : "repeat(3, minmax(0, 1fr))",
+        gap: 6,
+        marginTop: 8,
+        width: "100%",
+      },
+      children: fe.map(([G, ft, $]) =>
+        l.jsxs(
+          "div",
+          {
+            style: {
+              padding: "6px 8px",
+              background: u.card2,
+              borderRadius: 6,
+              minWidth: 0,
+            },
+            children: [
+              l.jsx("div", {
+                style: {
+                  fontSize: 9,
+                  color: u.text3,
+                  lineHeight: 1.2,
+                  marginBottom: 2,
+                },
+                children: G,
+              }),
+              l.jsx("div", {
+                style: {
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  color: $,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                },
+                children: ft,
+              }),
+            ],
+          },
+          G,
+        ),
+      ),
     });
   },
   RpCoAmt = (I) =>
@@ -14964,6 +15685,12 @@ function cg() {
     [x, m] = T.useState(null),
     [bootReady, setBootReady] = T.useState(!1),
     [cloudConflict, setCloudConflict] = T.useState(null),
+    [cloudBoot, setCloudBoot] = T.useState({
+      offline: !1,
+      source: "loading",
+      savedAt: 0,
+      stale: !1,
+    }),
     [_, k] = T.useState([]),
     [y, C] = T.useState([]),
     [h, p] = T.useState([]),
@@ -14978,9 +15705,14 @@ function cg() {
     [$, Q] = T.useState({ status: "loading", localOk: !0, cloudOk: !1 }),
     uploadQueueRef = T.useRef(null),
     loadedCloudRevisionRef = T.useRef(null),
+    activeCpRef = T.useRef("zfjnvrxmo8rj9ui"),
+    cloudHydratedFpRef = T.useRef(null),
+    dbPersistQueueRef = T.useRef(null),
+    cloudBootOfflineRef = T.useRef(!1),
     bootReadyRef = T.useRef(!1),
     applyCloudRef = T.useRef(null),
     oe = T.useCallback((g) => {
+      if (isDbMode()) return;
       if (!bootReadyRef.current || !uploadQueueRef.current) return;
       const I = Bu(g.pays),
         b = Yu(g.pays);
@@ -15010,14 +15742,54 @@ function cg() {
     [Vt, de] = T.useState(""),
     [mn, Rt] = T.useState("");
   (T.useEffect(() => {
+      activeCpRef.current = d;
+    }, [d]),
+    T.useEffect(() => {
       bootReadyRef.current = bootReady;
     }, [bootReady]),
     T.useEffect(() => {
+      cloudBootOfflineRef.current = cloudBoot.offline;
+    }, [cloudBoot.offline]),
+    T.useEffect(() => {
+      if (!isDbMode()) return;
+      dbPersistQueueRef.current = createDbPersistQueue({
+        applyDelta: dbApplyDelta,
+        onSaving: () => Q({ status: "saving", localOk: !0, cloudOk: !0 }),
+        onSaved: ({ ops }) => {
+          Q({ status: "saved", localOk: !0, cloudOk: !0 });
+          console.log(
+            isProductionDbMode()
+              ? "[CC Production] delta persisted"
+              : "[CC Staging] delta persisted",
+            { ops: ops?.length || 0 },
+          );
+        },
+        onError: (err) => {
+          Q({
+            status: err.code === "VERSION_CONFLICT" ? "conflict" : "error",
+            localOk: !0,
+            cloudOk: !1,
+          });
+          m(
+            err.code === "VERSION_CONFLICT"
+              ? "Row conflict — refresh to load latest data"
+              : `${isProductionDbMode() ? "Production" : "Staging"} save failed: ${err.message}`,
+          );
+        },
+        isOffline: () => cloudBootOfflineRef.current,
+      });
+      return () => {
+        dbPersistQueueRef.current = null;
+      };
+    }, []),
+    T.useEffect(() => {
       let cancelled = !1,
         cloudPoll = null;
-      const applyCloud = (Gt) => {
+      const applyCloud = (Gt, { commitRevision = !1 } = {}) => {
         const G = CcBootPayload(Gt);
-        (a(G.cp),
+        const cp = resolveActiveProject(activeCpRef.current, G.projs, G.cp);
+        cloudHydratedFpRef.current = fingerprintSignature(stateFingerprint(Gt));
+        (a(cp),
           k(G.projs),
           C(G.phases),
           p(G.tasks),
@@ -15030,12 +15802,61 @@ function cg() {
           te(G.orders),
           Gu("cloud-reload", {
             ...G,
+            cp,
             savedAt: (Gt == null ? void 0 : Gt.savedAt) || Date.now(),
-            cloudRevision: getCloudRevision(Gt),
           }),
-          (loadedCloudRevisionRef.current = getCloudRevision(Gt)));
+          commitRevision &&
+            Gt &&
+            (loadedCloudRevisionRef.current = loadedRevisionFromCloud(Gt)));
+        return { ...G, cp };
       };
       applyCloudRef.current = applyCloud;
+      if (isDbMode()) {
+        (async () => {
+          const modeLabel = isProductionDbMode() ? "Production DB" : "Staging";
+          console.log(`[CC ${modeLabel}] boot: loading normalized DB…`);
+          const result = await dbFetchState();
+          if (cancelled) return;
+          if (!result.ok || !result.state) {
+            console.error(`[CC ${modeLabel}] boot failed`, result.error);
+            setCloudBoot({
+              offline: !0,
+              source: isProductionDbMode() ? "production-error" : "staging-error",
+              savedAt: 0,
+              stale: !1,
+            });
+            setBootReady(!0);
+            Q({ status: "error", localOk: !1, cloudOk: !1 });
+            return;
+          }
+          applyCloud(result.state, { commitRevision: !1 });
+          dbPersistQueueRef.current?.setBaseline(dbSnapshot(result.state));
+          setCloudBoot({
+            offline: !!result.offline,
+            source: result.offline
+              ? isProductionDbMode()
+                ? "production-offline"
+                : "staging-offline"
+              : isProductionDbMode()
+                ? "production-db"
+                : "staging-db",
+            savedAt: result.savedAt || Date.now(),
+            stale: !1,
+          });
+          setBootReady(!0);
+          Q({
+            status: result.offline ? "offline" : "saved",
+            localOk: !0,
+            cloudOk: !result.offline,
+          });
+          result.offline &&
+            m(`${modeLabel} offline — read-only copy from cache`);
+          console.log(`[CC ${modeLabel}] boot complete`, result.counts);
+        })();
+        return () => {
+          cancelled = !0;
+        };
+      }
       uploadQueueRef.current ||
         (uploadQueueRef.current = createCloudUploadQueue({
           onStatusChange: (g, I) => Q({ status: g, ...(I || {}) }),
@@ -15050,7 +15871,7 @@ function cg() {
               setCloudConflict({ ...ctx, resolve });
             }),
           onLoadCloud: (g) => {
-            applyCloud(g);
+            applyCloud(g, { commitRevision: !0 });
             m("☁️ נטענו נתונים חדשים מהענן");
           },
           onRefreshLocalCache: (g) => {
@@ -15077,20 +15898,34 @@ function cg() {
             cloudRevision: qr,
             staleLocalRejected: St,
             rejectReason: Lr,
+            offline: bootOffline,
+            offlineSavedAt: bootOfflineAt,
+            staleLocal: bootStale,
           } = resolveBootState(fe, I, CC_SEED_RAW, { cloudFetchOk: g.ok }),
           G = CcBootPayload(Gt);
         if (cancelled) return;
-        if (!g.ok) {
-          console.error("[CC Sync] boot: cloud fetch failed after retries", g.error);
-          m("Cloud unavailable — using local data. Sync will retry when online.");
+        if (bootOffline) {
+          console.error("[CC Sync] boot: cloud unavailable", g.error || Lr);
+          setCloudBoot({
+            offline: !0,
+            source: b,
+            savedAt: bootOfflineAt || (I && I.savedAt) || 0,
+            stale: !!bootStale,
+          });
+        } else {
+          setCloudBoot({
+            offline: !1,
+            source: b,
+            savedAt: (Gt && Gt.savedAt) || 0,
+            stale: !1,
+          });
         }
-        (applyCloud(Gt),
-          (loadedCloudRevisionRef.current =
-            g.ok && fe
-              ? getCloudRevision(fe)
-              : g.ok && g.empty
-                ? 0
-                : null),
+        (applyCloud(Gt, { commitRevision: !!(g.ok && fe) }),
+          g.ok && g.empty
+            ? (loadedCloudRevisionRef.current = 0)
+            : !g.ok || bootOffline
+              ? (loadedCloudRevisionRef.current = null)
+              : void 0,
           console.log("[CC Sync] boot complete", {
             source: b,
             projs: G.projs.length,
@@ -15100,22 +15935,42 @@ function cg() {
             loadedCloudRevision: loadedCloudRevisionRef.current,
             staleLocalRejected: St || false,
             rejectReason: Lr || null,
+            bootOffline: !!bootOffline,
           }),
           St &&
             m(
-              `☁️ Loaded cloud — local cache was stale (${Lr || "incomplete vs cloud"}). Load cloud before editing.`,
+              `☁️ Loaded cloud — local cache was stale (${Lr || "incomplete vs cloud"}).`,
             ),
           b === "cloud" && g.ok && m("☁️ נתונים נטענו מהענן"),
-          uploadQueueRef.current.setCloudReady(g.ok),
+          uploadQueueRef.current.setCloudReady(g.ok && !bootOffline),
           setBootReady(!0));
-        g.ok ||
+        bootOffline &&
           (cloudPoll = setInterval(async () => {
             if (cancelled) return;
             const oe = await fetchStorageJson(CC_STATE_PATH);
-            oe.ok &&
-              (uploadQueueRef.current.setCloudReady(!0),
-              clearInterval(cloudPoll),
-              console.log("[CC Sync] cloud connection restored"));
+            if (
+              !oe.ok ||
+              oe.empty ||
+              !oe.data ||
+              !Array.isArray(oe.data.projs) ||
+              oe.data.projs.length === 0
+            )
+              return;
+            applyCloud(oe.data, { commitRevision: !0 });
+            uploadQueueRef.current.reconnectCloud(oe.data);
+            setCloudBoot({
+              offline: !1,
+              source: "cloud",
+              savedAt: oe.data.savedAt || 0,
+              stale: !1,
+            });
+            clearInterval(cloudPoll);
+            console.log("[CC Sync] cloud connection restored — loaded latest cloud", {
+              revision: getCloudRevision(oe.data),
+              projs: oe.data.projs.length,
+              pays: (oe.data.pays || []).length,
+            });
+            m("☁️ Cloud restored — loaded latest verified cloud data");
           }, 5000));
       })();
       return () => {
@@ -15167,6 +16022,39 @@ function cg() {
   }, []),
     T.useEffect(() => {
       if (!bootReady) return;
+      const statePayload = {
+        projs: _,
+        phases: y,
+        tasks: h,
+        pays: j,
+        contacts: M,
+        msgs: F,
+        notifs: V,
+        docs: P,
+        folders: w,
+        orders: ee,
+        cp: d,
+      };
+      if (isDbMode()) {
+        const q = dbPersistQueueRef.current;
+        if (!q) return;
+        const snap = dbSnapshot(statePayload);
+        if (cloudBoot.offline && q.pendingDeltaCount(snap) > 0) {
+          m(
+            isProductionDbMode()
+              ? "Production DB read-only — cannot save while offline"
+              : "Staging read-only — cannot save while offline",
+          );
+        }
+        q.schedule(snap);
+        return;
+      }
+      const snap = stagingSnapshot(statePayload);
+      const fp = fingerprintSignature(stateFingerprint(snap));
+      if (cloudHydratedFpRef.current && fp === cloudHydratedFpRef.current) {
+        return;
+      }
+      cloudHydratedFpRef.current = null;
       oe({
         projs: _,
         phases: y,
@@ -15180,7 +16068,7 @@ function cg() {
         orders: ee,
         cp: d,
       });
-    }, [_, y, h, j, M, F, V, P, w, ee, d, oe, bootReady]));
+    }, [_, y, h, j, M, F, V, P, w, ee, d, oe, bootReady, cloudBoot.offline]));
   const persistDocumentUpload = T.useCallback(
     async ({
       file,
@@ -15190,24 +16078,39 @@ function cg() {
       replaceDocId,
       patchContact,
     }) => {
-      if (!uploadQueueRef.current) throw new Error("Sync not ready");
       const pid = doc.pid || d;
       const storagePath = documentStoragePath(pid, doc.id, doc.name);
-      const up = await uploadDocumentFile(
-        storagePath,
-        file,
-        file.type || doc.type || "application/octet-stream",
-      );
+      const contentType = file.type || doc.type || "application/octet-stream";
+      const up = await ccUploadDocumentFile(storagePath, file, contentType);
       if (!up.ok) {
         throw new Error(up.body || `File upload failed (${up.status})`);
       }
+
+      const verified = await ccFetchDocumentBlob(storagePath, { ...doc, pid, storagePath }, pid);
+      if (!verified.ok || !verified.blob) {
+        throw new Error(
+          verified.error || "Storage upload could not be verified — document not saved",
+        );
+      }
+      const verifiedSize = verified.blob.size;
+      const expectedSize = file.size || doc.size || 0;
+      if (expectedSize > 0 && verifiedSize !== expectedSize) {
+        throw new Error(
+          `Storage verify failed: uploaded ${verifiedSize} bytes, expected ${expectedSize}`,
+        );
+      }
+
       const savedDoc = {
         ...doc,
         pid,
         storagePath,
+        size: verifiedSize || doc.size || file.size || 0,
+        type: contentType,
         data: null,
       };
       delete savedDoc.contactId;
+      delete savedDoc._dataStripped;
+      delete savedDoc._legacyInline;
 
       let nextDocs = P;
       let nextContacts = M;
@@ -15230,6 +16133,11 @@ function cg() {
         W(nextContacts);
       }
 
+      if (isDbMode()) {
+        return savedDoc;
+      }
+
+      if (!uploadQueueRef.current) throw new Error("Sync not ready");
       await uploadQueueRef.current.enqueueImmediate(
         {
           projs: _,
@@ -15436,6 +16344,7 @@ function cg() {
             contacts: M,
             setContacts: W,
             phases: y,
+            setPhases: C,
             showToast: Ve,
           });
         case "contractors":
@@ -15553,6 +16462,62 @@ function cg() {
           l.jsxs("main", {
             style: { flex: 1, overflow: "auto" },
             children: [
+              isStagingDbMode() &&
+                l.jsxs("div", {
+                  style: {
+                    padding: "10px 16px",
+                    background: "linear-gradient(90deg, #fef08a 0%, #fde047 50%, #fef08a 100%)",
+                    borderBottom: "3px solid #ca8a04",
+                    color: "#713f12",
+                    fontSize: 14,
+                    fontWeight: 700,
+                    lineHeight: 1.45,
+                    letterSpacing: "0.02em",
+                  },
+                  children: [
+                    "⚠️ STAGING ONLY — Canton Home Build Staging (cc_staging + staging Storage). ",
+                    "Production Supabase & state.json are NOT connected.",
+                    cloudBoot.offline ? " Read-only offline cache." : "",
+                  ],
+                }),
+              isProductionDbMode() &&
+                l.jsxs("div", {
+                  style: {
+                    padding: "10px 16px",
+                    background: "linear-gradient(90deg, #dbeafe 0%, #93c5fd 50%, #dbeafe 100%)",
+                    borderBottom: "3px solid #2563eb",
+                    color: "#1e3a8a",
+                    fontSize: 14,
+                    fontWeight: 700,
+                    lineHeight: 1.45,
+                    letterSpacing: "0.02em",
+                  },
+                  children: [
+                    "PRODUCTION DB MODE — cc_production + production Storage. ",
+                    "state.json is read-only (not written).",
+                    cloudBoot.offline ? " Read-only offline cache." : "",
+                  ],
+                }),
+              !isDbMode() &&
+                cloudBoot.offline &&
+                l.jsxs("div", {
+                  style: {
+                    padding: "8px 16px",
+                    background: "#fef3c7",
+                    borderBottom: "1px solid #f59e0b",
+                    color: "#92400e",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    lineHeight: 1.4,
+                  },
+                  children: [
+                    "☁️ Cloud unavailable — showing offline copy from ",
+                    formatOfflineSavedAt(cloudBoot.savedAt),
+                    cloudBoot.stale
+                      ? " (stale — may not match cloud; uploads blocked until cloud is verified)"
+                      : " (not verified against cloud; uploads blocked until cloud returns)",
+                  ],
+                }),
               l.jsxs("header", {
                 style: {
                   display: "flex",
@@ -15629,7 +16594,9 @@ function cg() {
                                 : syncSt === "pending"
                                   ? "☁️ ממתין לשמירה..."
                                   : syncSt === "offline"
-                                    ? "☁️ ממתין לרשת..."
+                                    ? cloudBoot.offline
+                                      ? `☁️ offline copy — ${formatOfflineSavedAt(cloudBoot.savedAt)}`
+                                      : "☁️ ממתין לרשת..."
                                     : syncSt === "conflict"
                                       ? "☁️ ⚠️ ענן מעודכן יותר"
                                       : syncSt === "error"
@@ -15942,8 +16909,10 @@ function cg() {
           e &&
             !ne &&
             !Rn &&
+            !["contractors", "suppliers", "phases", "budget"].includes(o) &&
             l.jsx("button", {
               onClick: () => hn(!0),
+              className: "cc-mobile-fab",
               style: {
                 position: "fixed",
                 bottom: 20,
@@ -15959,7 +16928,7 @@ function cg() {
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                zIndex: 50,
+                zIndex: 40,
                 fontSize: 22,
               },
               children: "📎",
