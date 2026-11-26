@@ -5,13 +5,9 @@
  * One-time setup: npm run setup:vercel:production
  */
 import { spawnSync } from "child_process";
-import { assertVercelEnvKeys } from "./shared/vercelEnv.mjs";
+import { assertVercelEnvKeys, listVercelEnv, vercelEnvTargets } from "./shared/vercelEnv.mjs";
 
-const vercelEnvKeys = [
-  "PRODUCTION_DATABASE_POOLER_URL",
-  "PRODUCTION_SUPABASE_URL",
-  "PRODUCTION_SUPABASE_SERVICE_ROLE_KEY",
-];
+const vercelEnvKeys = ["PRODUCTION_DATABASE_POOLER_URL", "PRODUCTION_SUPABASE_URL"];
 
 console.log("Running production deploy gate…");
 const gate = spawnSync("node", ["scripts/db/production-deploy-gate.mjs"], {
@@ -23,6 +19,18 @@ if (gate.status !== 0) process.exit(gate.status ?? 1);
 assertVercelEnvKeys(vercelEnvKeys, ["production"], {
   setupCommand: "npm run setup:vercel:production",
 });
+
+const vercelEnv = listVercelEnv();
+const hasProdSecret =
+  vercelEnvTargets("PRODUCTION_SUPABASE_SECRET_KEY", vercelEnv).includes("production") ||
+  vercelEnvTargets("PRODUCTION_SUPABASE_SERVICE_ROLE_KEY", vercelEnv).includes("production");
+if (!hasProdSecret) {
+  console.error(
+    "Vercel production missing PRODUCTION_SUPABASE_SECRET_KEY or PRODUCTION_SUPABASE_SERVICE_ROLE_KEY"
+  );
+  console.error("Run: npm run setup:vercel:production");
+  process.exit(1);
+}
 
 const buildEnv = [
   "VERCEL_BUILD_PROFILE=production-db",

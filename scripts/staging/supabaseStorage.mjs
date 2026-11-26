@@ -2,6 +2,7 @@
  * STAGING Supabase Storage only — never production bucket.
  */
 import { loadStagingEnv } from "../db/load-staging-env.mjs";
+import { resolveStagingSupabaseSecret } from "../../src/db/supabaseKeys.js";
 
 loadStagingEnv();
 
@@ -16,12 +17,10 @@ export function getStagingSupabaseUrl() {
 }
 
 export function getStagingServiceRoleKey() {
-  const key =
-    process.env.STAGING_SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.STAGING_SUPABASE_SERVICE_KEY;
+  const key = resolveStagingSupabaseSecret();
   if (!key) {
     throw new Error(
-      "STAGING_SUPABASE_SERVICE_ROLE_KEY required in .env.staging (Dashboard → Settings → API → service_role secret)"
+      "STAGING_SUPABASE_SECRET_KEY (sb_secret) or STAGING_SUPABASE_SERVICE_ROLE_KEY required in .env.staging"
     );
   }
   return key;

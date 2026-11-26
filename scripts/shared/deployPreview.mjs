@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { assertVercelEnvKeys } from "./vercelEnv.mjs";
+import { assertVercelEnvKeys, listVercelEnv, vercelEnvTargets as envTargetsForKey } from "./vercelEnv.mjs";
 
 export function runDeployPreview({
   label,
@@ -7,7 +7,8 @@ export function runDeployPreview({
   gateCommand,
   gateLabel,
   vercelEnvKeys,
-  vercelEnvTargets,
+  vercelEnvTargets: deployTargets,
+  vercelSecretEnvKeys,
   setupCommand,
   buildEnvFlags = [],
 }) {
@@ -20,7 +21,20 @@ export function runDeployPreview({
     }
   }
 
-  assertVercelEnvKeys(vercelEnvKeys, vercelEnvTargets, { setupCommand });
+  assertVercelEnvKeys(vercelEnvKeys, deployTargets, { setupCommand });
+
+  if (vercelSecretEnvKeys?.length) {
+    const data = listVercelEnv();
+    const hasSecret = vercelSecretEnvKeys.some((key) =>
+      envTargetsForKey(key, data).some((t) => deployTargets.includes(t))
+    );
+    if (!hasSecret) {
+      console.error("Vercel env missing Supabase secret — set one of:");
+      for (const k of vercelSecretEnvKeys) console.error(`  • ${k}`);
+      console.error(`Run: ${setupCommand}`);
+      process.exit(1);
+    }
+  }
 
   const args = [
     "deploy",

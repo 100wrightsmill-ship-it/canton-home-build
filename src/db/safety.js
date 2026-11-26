@@ -8,6 +8,7 @@ import {
   STAGING_SCHEMA,
 } from "./schemaConfig.js";
 import { getActiveSchema } from "./schemaContext.js";
+import { resolveProductionSupabaseSecret } from "./supabaseKeys.js";
 
 export const PRODUCTION_CONFIRM_ENV = "I_CONFIRM_PRODUCTION_CUTOVER";
 export const PRODUCTION_CONFIRM_VALUE = "yes";
@@ -23,11 +24,10 @@ export function requireProductionConfirmation() {
 /** DB-mode API storage writes — service role on server; cutover scripts use requireProductionConfirmation instead. */
 export function assertProductionApiStorageWriteAllowed() {
   if (process.env[PRODUCTION_CONFIRM_ENV] === PRODUCTION_CONFIRM_VALUE) return;
-  const key =
-    process.env.PRODUCTION_SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const key = resolveProductionSupabaseSecret();
   if (!key) {
     throw new Error(
-      "Production storage write blocked: PRODUCTION_SUPABASE_SERVICE_ROLE_KEY required for API storage operations"
+      "Production storage write blocked: PRODUCTION_SUPABASE_SECRET_KEY or PRODUCTION_SUPABASE_SERVICE_ROLE_KEY required for API storage operations"
     );
   }
 }
