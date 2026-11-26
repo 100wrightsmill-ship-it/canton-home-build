@@ -13,13 +13,19 @@
  * - CloudUploadQueue interface stays; swap uploadFn implementation
  */
 
-import { assertStateJsonWriteAllowed } from "../db/dbModeGuard.js";
+import { assertStateJsonWriteAllowed, isAnyDbMode } from "../db/dbModeGuard.js";
+import {
+  getClientSupabasePublishableKey,
+  getClientSupabaseUrl,
+  resolveScriptStorageApiKey,
+} from "../db/supabaseKeys.js";
 
 export const SYNC_SCHEMA_VERSION = 1;
 
-export const SUPABASE_URL = "https://bdckzzweimrmvcvvahbr.supabase.co";
-export const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJkY2t6endlaW1ybXZjdnZhaGJyIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTUyOTkyMiwiZXhwIjoyMDkxMTA1OTIyfQ.A8z-MorFw02VTw_fAsWLPq-T3-BggbdzkPDVSLIZqbg";
+/** @deprecated Use getClientSupabaseUrl() — kept for script compatibility */
+export function getSupabaseUrl() {
+  return getClientSupabaseUrl();
+}
 
 export const BUCKET = "cc-data";
 export const STATE_PATH = "state.json";
@@ -94,13 +100,26 @@ export function prepareCloudSnapshot(state) {
   return next;
 }
 
-const authHeaders = () => ({
-  Authorization: `Bearer ${SUPABASE_KEY}`,
-  apikey: SUPABASE_KEY,
-});
+function storageApiKey() {
+  if (isAnyDbMode()) {
+    throw new Error("Direct Supabase Storage access is disabled in DB mode — use the production/staging API");
+  }
+  const isViteClient =
+    typeof import.meta !== "undefined" && import.meta.env && typeof window !== "undefined";
+  if (isViteClient) return getClientSupabasePublishableKey();
+  return resolveScriptStorageApiKey();
+}
+
+const authHeaders = () => {
+  const key = storageApiKey();
+  return {
+    Authorization: `Bearer ${key}`,
+    apikey: key,
+  };
+};
 
 export function storageUrl(objectPath) {
-  return `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objectPath}`;
+  return `${getClientSupabaseUrl()}/storage/v1/object/${BUCKET}/${objectPath}`;
 }
 
 export async function fetchStorageJson(objectPath) {
@@ -544,7 +563,7 @@ export async function archiveCloudStateBeforeReplace(cloudData) {
 
 export async function listCloudStateBackups(limit = 40) {
   try {
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`, {
+    const res = await fetch(`${getClientSupabaseUrl()}/storage/v1/object/list/${BUCKET}`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({

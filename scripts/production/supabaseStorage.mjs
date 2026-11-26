@@ -9,6 +9,7 @@ import {
   assertProductionSupabaseUrl,
 } from "../../src/db/safety.js";
 import { PRODUCTION_SUPABASE_URL } from "../../src/db/schemaConfig.js";
+import { resolveProductionSupabaseSecret } from "../../src/db/supabaseKeys.js";
 import { BUCKET } from "../../src/sync/cloudSync.js";
 
 loadProductionEnv();
@@ -22,12 +23,10 @@ export function getProductionSupabaseUrl() {
 }
 
 export function getProductionServiceRoleKey() {
-  const key =
-    process.env.PRODUCTION_SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const key = resolveProductionSupabaseSecret();
   if (!key) {
     throw new Error(
-      "PRODUCTION_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY required in .env.production.local"
+      "PRODUCTION_SUPABASE_SECRET_KEY (sb_secret) or PRODUCTION_SUPABASE_SERVICE_ROLE_KEY required in .env.production.local"
     );
   }
   return key;

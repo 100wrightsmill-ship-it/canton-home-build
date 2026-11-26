@@ -38,6 +38,7 @@
     "deploy:staging:preview": "node scripts/deploy-staging-preview.mjs",
     "db:production:verify": "node scripts/db/verify-production-connection.mjs",
     "db:production:test:safety": "node scripts/db/test-production-safety.mjs",
+    "db:secrets:test": "node scripts/db/test-no-committed-secrets.mjs",
     "db:production:fetch-source": "node scripts/db/fetch-production-source.mjs",
     "db:production:record-baseline": "node scripts/db/record-production-baseline.mjs",
     "db:production:backup-storage": "node scripts/db/backup-production-storage.mjs",

@@ -18,11 +18,8 @@ const PROFILES = {
   staging: {
     file: ".env.staging",
     setupCommand: "npm run setup:vercel:staging",
-    keys: [
-      "STAGING_DATABASE_POOLER_URL",
-      "STAGING_SUPABASE_URL",
-      "STAGING_SUPABASE_SERVICE_ROLE_KEY",
-    ],
+    keys: ["STAGING_DATABASE_POOLER_URL", "STAGING_SUPABASE_URL"],
+    secretKeys: ["STAGING_SUPABASE_SECRET_KEY", "STAGING_SUPABASE_SERVICE_ROLE_KEY"],
     targets: ["preview"],
     validate(vars) {
       assertStagingPoolerUrl(vars.STAGING_DATABASE_POOLER_URL);
@@ -31,11 +28,8 @@ const PROFILES = {
   production: {
     file: ".env.production.local",
     setupCommand: "npm run setup:vercel:production",
-    keys: [
-      "PRODUCTION_DATABASE_POOLER_URL",
-      "PRODUCTION_SUPABASE_URL",
-      "PRODUCTION_SUPABASE_SERVICE_ROLE_KEY",
-    ],
+    keys: ["PRODUCTION_DATABASE_POOLER_URL", "PRODUCTION_SUPABASE_URL"],
+    secretKeys: ["PRODUCTION_SUPABASE_SECRET_KEY", "PRODUCTION_SUPABASE_SERVICE_ROLE_KEY"],
     targets: ["preview", "production"],
     validate(vars) {
       assertProductionPoolerUrl(vars.PRODUCTION_DATABASE_POOLER_URL);
@@ -62,6 +56,8 @@ async function syncProfile(name) {
   }
 
   const missing = profile.keys.filter((k) => !vars[k]);
+  const secretKeys = profile.secretKeys || [];
+  const hasSecret = secretKeys.some((k) => vars[k]);
   if (missing.length) {
     console.error(`Missing in ${profile.file}:`);
     for (const k of missing) {
@@ -75,6 +71,11 @@ async function syncProfile(name) {
     }
     process.exit(1);
   }
+  if (secretKeys.length && !hasSecret) {
+    console.error(`Missing Supabase server secret in ${profile.file} — set one of:`);
+    for (const k of secretKeys) console.error(`  • ${k}`);
+    process.exit(1);
+  }
 
   try {
     profile.validate(vars);
@@ -84,7 +85,8 @@ async function syncProfile(name) {
   }
 
   console.log(`\n=== Sync ${name} credentials to Vercel (${profile.targets.join(", ")}) ===`);
-  for (const key of profile.keys) {
+  const toSync = [...profile.keys, ...(profile.secretKeys || []).filter((k) => vars[k])];
+  for (const key of toSync) {
     upsertVercelEnv(key, vars[key], profile.targets);
   }
   console.log(`Done — ${name} env synced.\n`);

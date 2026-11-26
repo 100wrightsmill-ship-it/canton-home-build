@@ -11,3 +11,6 @@ dist/
 .jul29-phase2-inject.html
 .jul29-recovery-inject.html
 .jul29-jordan-electrical-text-patch.html
+src/App.jsx.backup*
+public/.production-recovery-restore.html
+backups/

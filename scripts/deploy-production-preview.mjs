@@ -11,9 +11,9 @@ runDeployPreview({
   localConfig: "vercel.production.json",
   gateCommand: ["scripts/db/production-deploy-gate.mjs"],
   gateLabel: "Running production deploy gate…",
-  vercelEnvKeys: [
-    "PRODUCTION_DATABASE_POOLER_URL",
-    "PRODUCTION_SUPABASE_URL",
+  vercelEnvKeys: ["PRODUCTION_DATABASE_POOLER_URL", "PRODUCTION_SUPABASE_URL"],
+  vercelSecretEnvKeys: [
+    "PRODUCTION_SUPABASE_SECRET_KEY",
     "PRODUCTION_SUPABASE_SERVICE_ROLE_KEY",
   ],
   vercelEnvTargets: ["preview"],
